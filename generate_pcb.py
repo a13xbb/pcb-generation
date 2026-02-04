@@ -44,16 +44,16 @@ def main():
     pads_folder = "PADS"
     pads_masks = [cv2.imread(os.path.join(pads_folder, name), cv2.IMREAD_GRAYSCALE) for name in os.listdir(pads_folder)
                   if name.startswith("mask") and name.endswith(".png")]
-    pad_assets = []
+    pad_assets: list[PadAsset] = []
     for pad_mask in pads_masks:
         bbox, centroid = compute_bbox_and_centroid(pad_mask)
         asset = PadAsset(pad_mask, orig_img, centroid, bbox)
         pad_assets.append(asset)
         
     traces_folder = "COPPER_TRACES"
-    trace_masks = [cv2.imread(os.path.join(traces_folder, name), cv2.IMREAD_GRAYSCALE) for name in os.listdir(traces_folder)
+    trace_masks = [cv2.imread(os.path.join(traces_folder, name), cv2.IMREAD_GRAYSCALE) for name in sorted(os.listdir(traces_folder))
                   if name.startswith("mask") and name.endswith(".png")]
-    trace_assets = []
+    trace_assets: list[TraceAsset] = []
     for trace_mask in trace_masks:
         skel = skeletonize(trace_mask)
         endpoints = find_endpoints(trace_mask, skel)
@@ -75,7 +75,9 @@ def main():
     
     place_pad_random(canvas, np.random.choice(pad_assets), padding=30)
     
-    place_trace_attached_to_pad(canvas, np.random.choice(trace_assets))
+    place_trace_attached_to_pad(canvas, trace_assets[0])
+    cv2.imwrite(f"debug_skel.png", trace_assets[0].skeleton)
+    cv2.imwrite(f"debug_endpoints.png", visualize_endpoints(trace_assets[0].mask, trace_assets[0].skeleton))
     
     visualize_canvas_real(canvas, "canvas.png")
             

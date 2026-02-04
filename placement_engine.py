@@ -226,6 +226,18 @@ def count_pad_connections(pad_instance, trace_instances, radius=5):
 
     return cnt
 
+def rotate_point(px, py, cx, cy, angle_deg):
+    a = np.deg2rad(angle_deg)
+
+    dx = px - cx
+    dy = py - cy
+
+    rx = dx * np.cos(a) - dy * np.sin(a)
+    ry = dx * np.sin(a) + dy * np.cos(a)
+
+    return cx + rx, cy + ry
+
+
 def place_trace_attached_to_pad(
     canvas_state: CanvasState,
     trace_asset: TraceAsset,
@@ -252,20 +264,38 @@ def place_trace_attached_to_pad(
 
         pad = random.choice(candidate_pads)
 
-        pad_cx, pad_cy = pad.asset.centroid
+        # ---- pad world centroid ----
+        ys, xs = np.where(pad.mask_world > 0)
+        pad_world_cx = xs.mean()
+        pad_world_cy = ys.mean()
 
-        # выбираем endpoint trace
+        # ---- endpoint trace ----
         ep_local = random.choice(trace_asset.endpoints)
 
-        # выбираем rotation
         angle = random.choice(angles)
 
-        # ---- трансформим mask ----
+        # ---- rotate endpoint around trace centroid ----
+        ep_rot_x, ep_rot_y = rotate_point(
+            ep_local[0], ep_local[1],
+            trace_asset.centroid[0],
+            trace_asset.centroid[1],
+            angle
+        )
+
+        # ---- compute tx ty so endpoint lands on pad ----
+        cx_local, cy_local = trace_asset.centroid
+
+        offset_x = ep_rot_x - cx_local
+        offset_y = ep_rot_y - cy_local
+
+        tx = pad_world_cx - offset_x
+        ty = pad_world_cy - offset_y
+
         mask_world, M = transform_mask(
             trace_asset.mask,
             angle,
-            pad_cx,
-            pad_cy,
+            tx,
+            ty,
             canvas_shape,
             trace_asset.centroid
         )
@@ -300,7 +330,7 @@ def place_trace_attached_to_pad(
         # ---- создаём instance ----
         instance = TraceInstance(
             asset=trace_asset,
-            transform=Transform(angle, pad_cx, pad_cy),
+            transform=Transform(angle, tx, ty),
             mask_world=mask_world,
             endpoints_world=endpoints_world
         )
@@ -374,6 +404,25 @@ def visualize_canvas_real(canvas: CanvasState, out_path="canvas_render.png"):
     canvas_img = np.zeros((canvas.h, canvas.w, 3), np.uint8)
 
     canvas_shape = (canvas.h, canvas.w)
+    
+     # ---- TRACES ----
+    for inst in canvas.trace_instances:
+
+        asset = inst.asset
+        T = inst.transform
+
+        img_world, _ = transform_image(
+            asset.image,
+            T.angle,
+            T.tx,
+            T.ty,
+            canvas_shape,
+            centroid=asset.centroid   # или centroid trace если добавишь
+        )
+
+        mask_world = inst.mask_world > 0
+
+        canvas_img[mask_world] = img_world[mask_world]
 
     # ---- PADs ----
     for inst in canvas.pad_instances:
@@ -388,25 +437,6 @@ def visualize_canvas_real(canvas: CanvasState, out_path="canvas_render.png"):
             T.ty,
             canvas_shape,
             centroid=asset.centroid
-        )
-
-        mask_world = inst.mask_world > 0
-
-        canvas_img[mask_world] = img_world[mask_world]
-
-    # ---- TRACES ----
-    for inst in canvas.trace_instances:
-
-        asset = inst.asset
-        T = inst.transform
-
-        img_world, _ = transform_image(
-            asset.image,
-            T.angle,
-            T.tx,
-            T.ty,
-            canvas_shape,
-            centroid=asset.centroid   # или centroid trace если добавишь
         )
 
         mask_world = inst.mask_world > 0
