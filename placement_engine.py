@@ -5,24 +5,27 @@ import matplotlib.pyplot as plt
 
 from classes import *
 
-def transform_mask(mask, angle, tx, ty, canvas_shape):
-    h, w = mask.shape
+# def transform_mask(mask, angle, tx, ty, canvas_shape):
+#     h, w = mask.shape
 
-    center = (w / 2, h / 2)
+#     center = (w / 2, h / 2)
 
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    M[:, 2] += [tx - center[0], ty - center[1]]
+#     M = cv2.getRotationMatrix2D(center, angle, 1.0)
+#     M[:, 2] += [tx - center[0], ty - center[1]]
 
-    warped = cv2.warpAffine(
-        mask,
-        M,
-        (canvas_shape[1], canvas_shape[0]),
-        flags=cv2.INTER_NEAREST,
-        borderValue=0
-    )
+#     warped = cv2.warpAffine(
+#         mask,
+#         M,
+#         (canvas_shape[1], canvas_shape[0]),
+#         flags=cv2.INTER_NEAREST,
+#         borderValue=0
+#     )
 
-    return warped, M
+#     return warped, M
 
+#--------------------------------------------------------------------------------
+# HELPER FUNCTIONS
+#--------------------------------------------------------------------------------
 
 def transform_mask(mask, angle, tx, ty, canvas_shape, centroid=None):
     """
@@ -96,6 +99,9 @@ def _bbox_distance(b1, b2):
 
     return np.sqrt(dx * dx + dy * dy)
 
+#--------------------------------------------------------------------------------
+#PADS PLACEMENT
+#--------------------------------------------------------------------------------
 
 def place_pad_random(
     canvas: CanvasState,
@@ -105,7 +111,8 @@ def place_pad_random(
     max_tries: int = 50):
     
     for _ in range(max_tries):
-        angle = random.choice([0, 90, 180, 270])
+        # angle = random.choice([0, 90, 180, 270])
+        angle = 0
 
         tx = np.random.randint(padding, canvas.w - padding)
         ty = np.random.randint(padding, canvas.h - padding)
@@ -170,31 +177,6 @@ def place_pad_random(
     return None
 
 
-def visualize_canvas(canvas: CanvasState, title="Canvas"):
-    img = canvas.occupied_mask.astype(np.uint8) * 255
-
-    vis = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-
-    for inst in canvas.pad_instances:
-        bbox = _bbox_from_mask(inst.mask_world)
-        if bbox is None:
-            continue
-
-        x1, y1, x2, y2 = bbox
-
-        # bbox — зеленый
-        cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 1)
-
-        # centroid — красный
-        ys, xs = np.where(inst.mask_world > 0)
-        if len(xs) > 0:
-            cx = int(xs.mean())
-            cy = int(ys.mean())
-            cv2.circle(vis, (cx, cy), 2, (255, 0, 0), -1)
-
-    cv2.imwrite("pads_placement.png", vis)
-    
-    
 def test_pad_placement(
     pad_assets_list: List[PadAsset],
     canvas_w=512,
@@ -222,6 +204,216 @@ def test_pad_placement(
 
     print(f"Placed {placed}/{n_pads} pads")
 
-    visualize_canvas(canvas, title=f"Placed {placed} pads")
+    visualize_canvas_real(canvas)
 
     return canvas
+
+#--------------------------------------------------------------------------------
+#TRACES PLACEMENT
+#--------------------------------------------------------------------------------
+
+def count_pad_connections(pad_instance, trace_instances, radius=5):
+
+    cx, cy = map(int, pad_instance.asset.centroid)
+
+    cnt = 0
+
+    for tr in trace_instances:
+        for ex, ey in tr.endpoints_world:
+            if abs(ex - cx) <= radius and abs(ey - cy) <= radius:
+                cnt += 1
+                break
+
+    return cnt
+
+def place_trace_attached_to_pad(
+    canvas_state: CanvasState,
+    trace_asset: TraceAsset,
+    angles=(0, 90, 180, 270),
+    max_attempts=50
+):
+
+    if len(canvas_state.pad_instances) == 0:
+        return None
+
+    # ---- выбираем допустимые пады ----
+    candidate_pads = [
+        p for p in canvas_state.pad_instances
+        if count_pad_connections(p, canvas_state.trace_instances) < 3
+    ]
+
+    if not candidate_pads:
+        return None
+
+    canvas_shape = (canvas_state.h, canvas_state.w)
+
+    # ---- пробуем placement ----
+    for _ in range(max_attempts):
+
+        pad = random.choice(candidate_pads)
+
+        pad_cx, pad_cy = pad.asset.centroid
+
+        # выбираем endpoint trace
+        ep_local = random.choice(trace_asset.endpoints)
+
+        # выбираем rotation
+        angle = random.choice(angles)
+
+        # ---- трансформим mask ----
+        mask_world, M = transform_mask(
+            trace_asset.mask,
+            angle,
+            pad_cx,
+            pad_cy,
+            canvas_shape,
+            trace_asset.centroid
+        )
+
+        if M is None:
+            continue
+
+        # ---- transform endpoints ----
+        endpoints_world = transform_points(trace_asset.endpoints, M)
+
+        # ---- проверка пересечений ----
+        # разрешаем overlap только с target pad
+        pad_mask = pad.mask_world
+
+        overlap = mask_world & canvas_state.occupied_mask
+
+        illegal_overlap = overlap & (~pad_mask)
+
+        if np.any(illegal_overlap):
+            continue
+
+        # ---- проверка пересечения с trace отдельно (опционально, но чище)
+        intersects_trace = False
+        for tr in canvas_state.trace_instances:
+            if np.any(mask_world & tr.mask_world):
+                intersects_trace = True
+                break
+
+        if intersects_trace:
+            continue
+
+        # ---- создаём instance ----
+        instance = TraceInstance(
+            asset=trace_asset,
+            transform=Transform(angle, pad_cx, pad_cy),
+            mask_world=mask_world,
+            endpoints_world=endpoints_world
+        )
+
+        canvas_state.trace_instances.append(instance)
+        canvas_state.occupied_mask |= mask_world
+
+        return instance
+
+    return None
+
+#--------------------------------------------------------------------------------
+#VISUALIZATION OF CANVAS
+#--------------------------------------------------------------------------------
+
+# def visualize_canvas(canvas: CanvasState, title="Canvas"):
+#     img = canvas.occupied_mask.astype(np.uint8) * 255
+
+#     vis = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+
+#     for inst in canvas.pad_instances:
+#         bbox = _bbox_from_mask(inst.mask_world)
+#         if bbox is None:
+#             continue
+
+#         x1, y1, x2, y2 = bbox
+
+#         # bbox — зеленый
+#         cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 1)
+
+#         # centroid — красный
+#         ys, xs = np.where(inst.mask_world > 0)
+#         if len(xs) > 0:
+#             cx = int(xs.mean())
+#             cy = int(ys.mean())
+#             cv2.circle(vis, (cx, cy), 2, (255, 0, 0), -1)
+
+#     cv2.imwrite("pads_placement.png", vis)
+
+def transform_image(image, angle, tx, ty, canvas_shape, centroid=None):
+
+    h, w = image.shape[:2]
+
+    if centroid is None:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        ys, xs = np.where(gray > 0)
+        if len(xs) == 0:
+            return np.zeros((*canvas_shape, 3), dtype=image.dtype), None
+        cx, cy = xs.mean(), ys.mean()
+    else:
+        cx, cy = centroid
+
+    M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
+
+    M[0, 2] += tx - cx
+    M[1, 2] += ty - cy
+
+    warped = cv2.warpAffine(
+        image,
+        M,
+        (canvas_shape[1], canvas_shape[0]),
+        flags=cv2.INTER_NEAREST,
+        borderValue=(0, 0, 0)
+    )
+
+    return warped, M
+
+
+def visualize_canvas_real(canvas: CanvasState, out_path="canvas_render.png"):
+
+    canvas_img = np.zeros((canvas.h, canvas.w, 3), np.uint8)
+
+    canvas_shape = (canvas.h, canvas.w)
+
+    # ---- PADs ----
+    for inst in canvas.pad_instances:
+
+        asset = inst.asset
+        T = inst.transform
+
+        img_world, _ = transform_image(
+            asset.image,
+            T.angle,
+            T.tx,
+            T.ty,
+            canvas_shape,
+            centroid=asset.centroid
+        )
+
+        mask_world = inst.mask_world > 0
+
+        canvas_img[mask_world] = img_world[mask_world]
+
+    # ---- TRACES ----
+    for inst in canvas.trace_instances:
+
+        asset = inst.asset
+        T = inst.transform
+
+        img_world, _ = transform_image(
+            asset.image,
+            T.angle,
+            T.tx,
+            T.ty,
+            canvas_shape,
+            centroid=asset.centroid   # или centroid trace если добавишь
+        )
+
+        mask_world = inst.mask_world > 0
+
+        canvas_img[mask_world] = img_world[mask_world]
+
+    cv2.imwrite(out_path, canvas_img)
+
+    
+

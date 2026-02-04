@@ -105,7 +105,7 @@ def split_trace_instances(
         if mask is None or obj is None:
             continue
 
-        # бинаризация на всякий случай
+        # --- бинаризация ---
         bin_mask = (mask > 0).astype(np.uint8)
 
         num_labels, labels = cv2.connectedComponents(
@@ -113,7 +113,7 @@ def split_trace_instances(
             connectivity=8
         )
 
-        # фон = label 0
+        # --- Если всего одна компонента ---
         if num_labels <= 2:
             comp_mask = (labels == 1).astype(np.uint8) * 255
             area = comp_mask.sum() // 255
@@ -121,11 +121,13 @@ def split_trace_instances(
             if area < min_area:
                 shutil.move(mask_path, os.path.join(folder, trash_folder, mask_name))
                 shutil.move(object_path, os.path.join(folder, trash_folder, object_name))
+
             continue
 
         base_name, ext = os.path.splitext(mask_name)
 
         comp_idx = 0
+
         for label in range(1, num_labels):
             comp_mask = (labels == label).astype(np.uint8) * 255
             area = comp_mask.sum() // 255
@@ -133,20 +135,12 @@ def split_trace_instances(
             if area < min_area:
                 continue
 
-            # bounding box (чтобы не сохранять пустоты)
-            ys, xs = np.where(comp_mask > 0)
-            ymin, ymax = ys.min(), ys.max()
-            xmin, xmax = xs.min(), xs.max()
+            # --- FULL CANVAS MASK ---
+            full_mask = comp_mask.astype(np.uint8)
 
-            comp_mask_cropped = comp_mask[ymin:ymax+1, xmin:xmax+1]
-            comp_obj_cropped = obj[ymin:ymax+1, xmin:xmax+1]
-
-            # применяем маску
-            comp_obj_cropped = cv2.bitwise_and(
-                comp_obj_cropped,
-                comp_obj_cropped,
-                mask=comp_mask_cropped
-            )
+            # --- FULL CANVAS OBJECT ---
+            full_obj = np.zeros_like(obj)
+            full_obj[full_mask > 0] = obj[full_mask > 0]
 
             new_suffix = suffix.replace(
                 ext, f"_{comp_idx}{ext}"
@@ -154,16 +148,17 @@ def split_trace_instances(
 
             cv2.imwrite(
                 os.path.join(folder, f"{mask_prefix}{new_suffix}"),
-                comp_mask_cropped
+                full_mask
             )
+
             cv2.imwrite(
                 os.path.join(folder, f"{object_prefix}{new_suffix}"),
-                comp_obj_cropped
+                full_obj
             )
 
             comp_idx += 1
 
-        # переносим исходные файлы в trash
+        # --- перенос исходников ---
         shutil.move(mask_path, os.path.join(folder, trash_folder, mask_name))
         shutil.move(object_path, os.path.join(folder, trash_folder, object_name))
         

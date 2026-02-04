@@ -4,17 +4,20 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 class PadAsset:
-    def __init__(self, mask: np.ndarray, centroid: Tuple[float, float], bbox: Tuple[int, int, int, int]):  
+    def __init__(self, mask: np.ndarray, image: np.ndarray, centroid: Tuple[float, float], bbox: Tuple[int, int, int, int]):  
         self.mask = mask
+        self.image = image
         self.centroid = centroid
         self.bbox = bbox
         self.h, self.w = mask.shape
     
 class TraceAsset:
-    def __init__(self, mask: np.ndarray, skeleton: np.ndarray, endpoints: List[Tuple[int, int]], length: float):
+    def __init__(self, mask: np.ndarray, image: np.ndarray, skeleton: np.ndarray, endpoints: List[Tuple[int, int]], centroid: Tuple[float, float], length: float):
         self.mask = mask
+        self.image = image
         self.skeleton = skeleton
         self.endpoints = endpoints
+        self.centroid = centroid
         self.length = length
         self.h, self.h = mask.shape
         
