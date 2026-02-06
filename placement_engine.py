@@ -226,16 +226,39 @@ def count_pad_connections(pad_instance, trace_instances, radius=5):
 
     return cnt
 
-def rotate_point(px, py, cx, cy, angle_deg):
-    a = np.deg2rad(angle_deg)
 
-    dx = px - cx
-    dy = py - cy
+def build_affine_align_point(mask_shape, centroid_xy, angle_deg, point_xy, target_xy):
+    """
+    Возвращает матрицу M (2x3), которая:
+    - вращает вокруг centroid_xy
+    - затем сдвигает так, чтобы point_xy перешёл в target_xy
+    """
+    cx, cy = centroid_xy
+    px, py = point_xy
+    tx, ty = target_xy
 
-    rx = dx * np.cos(a) - dy * np.sin(a)
-    ry = dx * np.sin(a) + dy * np.cos(a)
+    # чистый поворот вокруг центроида (как в transform_mask)
+    M = cv2.getRotationMatrix2D((cx, cy), angle_deg, 1.0)
 
-    return cx + rx, cy + ry
+    # куда попал point после поворота (без доп. сдвига)
+    p = np.array([px, py, 1.0], dtype=np.float32)
+    prx, pry = (p @ M.T)
+
+    # добавляем сдвиг так, чтобы pr -> target
+    M[0, 2] += tx - prx
+    M[1, 2] += ty - pry
+
+    return M
+
+def warp_mask_with_M(mask, M, canvas_shape):
+    warped = cv2.warpAffine(
+        mask,
+        M,
+        (canvas_shape[1], canvas_shape[0]),
+        flags=cv2.INTER_NEAREST,
+        borderValue=0
+    )
+    return warped
 
 
 def place_trace_attached_to_pad(
@@ -266,44 +289,22 @@ def place_trace_attached_to_pad(
 
         # ---- pad world centroid ----
         ys, xs = np.where(pad.mask_world > 0)
-        pad_world_cx = xs.mean()
-        pad_world_cy = ys.mean()
+        pad_world_cx = float(xs.mean())
+        pad_world_cy = float(ys.mean())
 
-        # ---- endpoint trace ----
         ep_local = random.choice(trace_asset.endpoints)
-
         angle = random.choice(angles)
 
-        # ---- rotate endpoint around trace centroid ----
-        ep_rot_x, ep_rot_y = rotate_point(
-            ep_local[0], ep_local[1],
-            trace_asset.centroid[0],
-            trace_asset.centroid[1],
-            angle
+        # Строим M так, чтобы ep_local приклеился к центру пада
+        M = build_affine_align_point(
+            mask_shape=trace_asset.mask.shape,
+            centroid_xy=trace_asset.centroid,
+            angle_deg=angle,
+            point_xy=ep_local,
+            target_xy=(pad_world_cx, pad_world_cy)
         )
 
-        # ---- compute tx ty so endpoint lands on pad ----
-        cx_local, cy_local = trace_asset.centroid
-
-        offset_x = ep_rot_x - cx_local
-        offset_y = ep_rot_y - cy_local
-
-        tx = pad_world_cx - offset_x
-        ty = pad_world_cy - offset_y
-
-        mask_world, M = transform_mask(
-            trace_asset.mask,
-            angle,
-            tx,
-            ty,
-            canvas_shape,
-            trace_asset.centroid
-        )
-
-        if M is None:
-            continue
-
-        # ---- transform endpoints ----
+        mask_world = warp_mask_with_M(trace_asset.mask, M, canvas_shape)
         endpoints_world = transform_points(trace_asset.endpoints, M)
 
         # ---- проверка пересечений ----
@@ -328,9 +329,12 @@ def place_trace_attached_to_pad(
             continue
 
         # ---- создаём instance ----
+        c = np.array([trace_asset.centroid[0], trace_asset.centroid[1], 1.0], dtype=np.float32)
+        tx_world, ty_world = (c @ M.T)
+
         instance = TraceInstance(
             asset=trace_asset,
-            transform=Transform(angle, tx, ty),
+            transform=Transform(angle, tx_world, ty_world),
             mask_world=mask_world,
             endpoints_world=endpoints_world
         )

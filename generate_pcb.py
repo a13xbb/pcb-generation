@@ -78,6 +78,8 @@ def main():
     place_trace_attached_to_pad(canvas, trace_assets[0])
     cv2.imwrite(f"debug_skel.png", trace_assets[0].skeleton)
     cv2.imwrite(f"debug_endpoints.png", visualize_endpoints(trace_assets[0].mask, trace_assets[0].skeleton))
+
+    # canvas.pad_instances[0]
     
     visualize_canvas_real(canvas, "canvas.png")
             
