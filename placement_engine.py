@@ -4,25 +4,6 @@ import cv2
 import matplotlib.pyplot as plt
 
 from classes import *
-
-# def transform_mask(mask, angle, tx, ty, canvas_shape):
-#     h, w = mask.shape
-
-#     center = (w / 2, h / 2)
-
-#     M = cv2.getRotationMatrix2D(center, angle, 1.0)
-#     M[:, 2] += [tx - center[0], ty - center[1]]
-
-#     warped = cv2.warpAffine(
-#         mask,
-#         M,
-#         (canvas_shape[1], canvas_shape[0]),
-#         flags=cv2.INTER_NEAREST,
-#         borderValue=0
-#     )
-
-#     return warped, M
-
 #--------------------------------------------------------------------------------
 # HELPER FUNCTIONS
 #--------------------------------------------------------------------------------
@@ -162,7 +143,7 @@ def place_pad_random(
                 continue
 
         # --- 7. Размещение ---
-        canvas.occupied_mask |= mask_world
+        canvas.occupied_mask |= (mask_world > 0).astype(np.uint8)
 
         inst = PadInstance(
             pad_asset,
@@ -175,6 +156,123 @@ def place_pad_random(
         return inst
 
     return None
+
+
+def place_pad_attached_to_open_end(
+    canvas_state: CanvasState,
+    pad_asset: PadAsset,
+    open_end: OpenEnd,
+    open_ends: list[OpenEnd],
+    traces_by_id: dict[int, TraceInstance],
+    next_pad_id: int,
+    angles=(0, 90, 180, 270),
+    max_attempts: int = 20,
+    require_touch: bool = True
+):
+    """
+    Пытается разместить pad так, чтобы он приклеился к open_end (концу существующего трейса).
+    Возвращает (pad_instance, new_next_pad_id) или (None, next_pad_id).
+    """
+
+    # 0) Найти trace instance
+    if open_end.trace_id not in traces_by_id:
+        return None, next_pad_id
+    tr = traces_by_id[open_end.trace_id]
+
+    # Если этот конец уже закрыт — ничего не делаем
+    if tr.pad_end[open_end.end_idx] is not None:
+        # убрать open_end как устаревший
+        try:
+            open_ends.remove(open_end)
+        except ValueError:
+            pass
+        return None, next_pad_id
+
+    # Точка приклейки (world)
+    attach_x, attach_y = open_end.pos_xy
+    attach_x = float(attach_x)
+    attach_y = float(attach_y)
+
+    canvas_shape = (canvas_state.h, canvas_state.w)
+
+    # если у пада уже 3 подключения — смысла ставить его нет (обычно у нового пада 0)
+    # но оставим защиту
+    # NOTE: мы создаём новый pad, у него будет 1 подключение после приклейки.
+
+    angles_list = list(angles)
+
+    for _ in range(max_attempts):
+        angle = random.choice(angles_list)
+
+        # affine: centroid pad -> attach point
+        # здесь можно использовать твой transform_mask напрямую
+        pad_mask_world, M = transform_mask(
+            pad_asset.mask,
+            angle,
+            attach_x,
+            attach_y,
+            canvas_shape,
+            centroid=pad_asset.centroid
+        )
+        if M is None or pad_mask_world is None:
+            continue
+
+        pad_mask_world = (pad_mask_world > 0).astype(np.uint8)  # 0/1
+
+        if np.sum(pad_mask_world) == 0:
+            continue
+
+        # 1) Требуем контакт с трейсом (иначе можно “приклеить” рядом)
+        if require_touch:
+            if not np.any((pad_mask_world > 0) & (tr.mask_world > 0)):
+                continue
+
+        # 2) Коллизии: запрещаем пересечение со всем, кроме этого trace
+        # Разрешаем overlap с trace (tr.mask_world), но не с остальным occupied
+        overlap = (pad_mask_world > 0) & (canvas_state.occupied_mask > 0)
+        illegal_overlap = overlap & ~(tr.mask_world > 0)
+        if np.any(illegal_overlap):
+            continue
+
+        # 3) Явно запретим пересечение с другими трассами (кроме tr) — надёжно
+        bad = False
+        for other in canvas_state.trace_instances:
+            if other.id == tr.id:
+                continue
+            if np.any((pad_mask_world > 0) & (other.mask_world > 0)):
+                bad = True
+                break
+        if bad:
+            continue
+
+        # (опционально) 4) Ограничение степени нового пада после приклейки:
+        # здесь всегда будет 1, но если ты потом захочешь “приклеивать к существующему паду” — пригодится.
+
+        # SUCCESS -> создаём pad instance
+        pad_inst = PadInstance(
+            asset=pad_asset,
+            transform=Transform(angle, attach_x, attach_y),
+            mask_world=pad_mask_world,
+            id=next_pad_id
+        )
+        pad_inst.attached_traces = set([tr.id])
+
+        # обновляем trace
+        tr.pad_end[open_end.end_idx] = pad_inst.id
+
+        # коммит в canvas
+        canvas_state.pad_instances.append(pad_inst)
+        canvas_state.occupied_mask |= pad_mask_world
+
+        # закрываем open end
+        try:
+            open_ends.remove(open_end)
+        except ValueError:
+            pass
+
+        return pad_inst, next_pad_id + 1
+
+    return None, next_pad_id
 
 
 def test_pad_placement(
@@ -260,42 +358,55 @@ def warp_mask_with_M(mask, M, canvas_shape):
     )
     return warped
 
+def pick_random_valid_pad(canvas_state: CanvasState, max_degree: int = 3):
+    """
+    Возвращает случайный pad_instance, у которого степень < max_degree.
+    """
+    candidates = [
+        p for p in canvas_state.pad_instances
+        if count_pad_connections(p, canvas_state.trace_instances) < max_degree
+    ]
+    if not candidates:
+        return None
+    return random.choice(candidates)
 
-def place_trace_attached_to_pad(
+def place_trace_attached_to_specific_pad(
     canvas_state: CanvasState,
     trace_asset: TraceAsset,
+    pad: PadInstance,
+    open_ends: list[OpenEnd],
+    next_trace_id: int,
     angles=(0, 90, 180, 270),
-    max_attempts=50
+    max_attempts: int = 20,
+    require_touch: bool = True,
 ):
-
-    if len(canvas_state.pad_instances) == 0:
-        return None
-
-    # ---- выбираем допустимые пады ----
-    candidate_pads = [
-        p for p in canvas_state.pad_instances
-        if count_pad_connections(p, canvas_state.trace_instances) < 3
-    ]
-
-    if not candidate_pads:
-        return None
-
+    """
+    Пытается приклеить trace_asset к конкретному pad_instance.
+    Возвращает (trace_instance, attached_endpoint_index) или (None, None).
+    """
+    
+    if pad.id is None:
+        raise ValueError("pad.id must be set before attaching traces")
+    
     canvas_shape = (canvas_state.h, canvas_state.w)
 
-    # ---- пробуем placement ----
+    # pad world centroid (можно потом заменить на точку на границе пада)
+    ys, xs = np.where(pad.mask_world > 0)
+    if len(xs) == 0:
+        return None, None
+    pad_world_cx = float(xs.mean())
+    pad_world_cy = float(ys.mean())
+
+    # Чтобы попытки были разнообразнее:
+    endpoints = list(trace_asset.endpoints)
+    angles_list = list(angles)
+
     for _ in range(max_attempts):
+        ep_idx = random.randrange(len(endpoints))
+        ep_local = endpoints[ep_idx]
+        angle = random.choice(angles_list)
 
-        pad = random.choice(candidate_pads)
-
-        # ---- pad world centroid ----
-        ys, xs = np.where(pad.mask_world > 0)
-        pad_world_cx = float(xs.mean())
-        pad_world_cy = float(ys.mean())
-
-        ep_local = random.choice(trace_asset.endpoints)
-        angle = random.choice(angles)
-
-        # Строим M так, чтобы ep_local приклеился к центру пада
+        # affine: выбранный endpoint -> pad centroid
         M = build_affine_align_point(
             mask_shape=trace_asset.mask.shape,
             centroid_xy=trace_asset.centroid,
@@ -305,74 +416,178 @@ def place_trace_attached_to_pad(
         )
 
         mask_world = warp_mask_with_M(trace_asset.mask, M, canvas_shape)
+
+        # быстрый отсев: пустая маска (вылетела за канвас)
+        if mask_world is None or np.sum(mask_world) == 0:
+            continue
+
+        # endpoints world
         endpoints_world = transform_points(trace_asset.endpoints, M)
 
-        # ---- проверка пересечений ----
-        # разрешаем overlap только с target pad
-        pad_mask = pad.mask_world
+        # 1) Требуем реальный контакт с pad (защита от “почти приклеили”)
+        if require_touch:
+            if not np.any((mask_world > 0) & (pad.mask_world > 0)):
+                continue
 
-        overlap = mask_world & canvas_state.occupied_mask
-
-        illegal_overlap = overlap & (~pad_mask)
-
+        # 2) Разрешаем overlap только с target pad
+        overlap = (mask_world > 0) & (canvas_state.occupied_mask > 0)
+        illegal_overlap = overlap & ~(pad.mask_world > 0)
         if np.any(illegal_overlap):
             continue
 
-        # ---- проверка пересечения с trace отдельно (опционально, но чище)
+        # 3) Трейсы не должны пересекаться друг с другом (явная проверка)
         intersects_trace = False
         for tr in canvas_state.trace_instances:
-            if np.any(mask_world & tr.mask_world):
+            if np.any((mask_world > 0) & (tr.mask_world > 0)):
                 intersects_trace = True
                 break
-
         if intersects_trace:
             continue
 
-        # ---- создаём instance ----
+        # ok -> создаём instance
         c = np.array([trace_asset.centroid[0], trace_asset.centroid[1], 1.0], dtype=np.float32)
         tx_world, ty_world = (c @ M.T)
 
-        instance = TraceInstance(
+        inst = TraceInstance(
             asset=trace_asset,
-            transform=Transform(angle, tx_world, ty_world),
-            mask_world=mask_world,
+            transform=Transform(angle, float(tx_world), float(ty_world)),
+            mask_world=mask_world.astype(np.uint8),
             endpoints_world=endpoints_world
         )
+        
+        # assign id
+        inst.id = next_trace_id
 
-        canvas_state.trace_instances.append(instance)
-        canvas_state.occupied_mask |= mask_world
+        # connection: attached endpoint -> this pad
+        inst.pad_end[ep_idx] = pad.id
+        pad.attached_traces.add(inst.id)
+        
+        # create open end for the other endpoint
+        free_idx = 1 - ep_idx
+        free_pos = inst.endpoints_world[free_idx]
+        open_ends.append(OpenEnd(trace_id=inst.id, end_idx=free_idx, pos_xy=free_pos))
 
-        return instance
+        canvas_state.trace_instances.append(inst)
+        canvas_state.occupied_mask |= (mask_world > 0).astype(np.uint8) if canvas_state.occupied_mask.max() > 1 else (mask_world > 0).astype(np.uint8)
 
-    return None
+        return inst, ep_idx
+
+    return None, None
+
+def place_trace_attached_to_pad(
+    canvas_state: CanvasState,
+    trace_asset: TraceAsset,
+    max_degree: int = 3,
+    angles=(0, 90, 180, 270),
+    max_attempts_pad_pick: int = 20,
+    max_attempts_attach: int = 20,
+):
+    """
+    Старая семантика: сам выбирает валидный pad и пытается к нему приклеить trace.
+    """
+    for _ in range(max_attempts_pad_pick):
+        pad = pick_random_valid_pad(canvas_state, max_degree=max_degree)
+        if pad is None:
+            return None, None
+        inst, ep_idx = place_trace_attached_to_specific_pad(
+            canvas_state,
+            trace_asset,
+            pad,
+            angles=angles,
+            max_attempts=max_attempts_attach
+        )
+        if inst is not None:
+            return inst, ep_idx
+    return None, None
+
+# def place_trace_attached_to_pad(
+#     canvas_state: CanvasState,
+#     trace_asset: TraceAsset,
+#     angles=(0, 90, 180, 270),
+#     max_attempts=50
+# ):
+
+#     if len(canvas_state.pad_instances) == 0:
+#         return None
+
+#     # ---- выбираем допустимые пады ----
+#     candidate_pads = [
+#         p for p in canvas_state.pad_instances
+#         if count_pad_connections(p, canvas_state.trace_instances) < 3
+#     ]
+
+#     if not candidate_pads:
+#         return None
+
+#     canvas_shape = (canvas_state.h, canvas_state.w)
+
+#     # ---- пробуем placement ----
+#     for _ in range(max_attempts):
+
+#         pad = random.choice(candidate_pads)
+
+#         # ---- pad world centroid ----
+#         ys, xs = np.where(pad.mask_world > 0)
+#         pad_world_cx = float(xs.mean())
+#         pad_world_cy = float(ys.mean())
+
+#         ep_local = random.choice(trace_asset.endpoints)
+#         angle = random.choice(angles)
+
+#         # Строим M так, чтобы ep_local приклеился к центру пада
+#         M = build_affine_align_point(
+#             mask_shape=trace_asset.mask.shape,
+#             centroid_xy=trace_asset.centroid,
+#             angle_deg=angle,
+#             point_xy=ep_local,
+#             target_xy=(pad_world_cx, pad_world_cy)
+#         )
+
+#         mask_world = warp_mask_with_M(trace_asset.mask, M, canvas_shape)
+#         endpoints_world = transform_points(trace_asset.endpoints, M)
+
+#         # ---- проверка пересечений ----
+#         # разрешаем overlap только с target pad
+#         pad_mask = pad.mask_world
+
+#         overlap = mask_world & canvas_state.occupied_mask
+
+#         illegal_overlap = overlap & (~pad_mask)
+
+#         if np.any(illegal_overlap):
+#             continue
+
+#         # ---- проверка пересечения с trace отдельно (опционально, но чище)
+#         intersects_trace = False
+#         for tr in canvas_state.trace_instances:
+#             if np.any(mask_world & tr.mask_world):
+#                 intersects_trace = True
+#                 break
+
+#         if intersects_trace:
+#             continue
+
+#         # ---- создаём instance ----
+#         c = np.array([trace_asset.centroid[0], trace_asset.centroid[1], 1.0], dtype=np.float32)
+#         tx_world, ty_world = (c @ M.T)
+
+#         instance = TraceInstance(
+#             asset=trace_asset,
+#             transform=Transform(angle, tx_world, ty_world),
+#             mask_world=mask_world,
+#             endpoints_world=endpoints_world
+#         )
+
+#         canvas_state.trace_instances.append(instance)
+#         canvas_state.occupied_mask |= mask_world
+
+#         return instance
+
+#     return None
 
 #--------------------------------------------------------------------------------
 #VISUALIZATION OF CANVAS
 #--------------------------------------------------------------------------------
-
-# def visualize_canvas(canvas: CanvasState, title="Canvas"):
-#     img = canvas.occupied_mask.astype(np.uint8) * 255
-
-#     vis = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-
-#     for inst in canvas.pad_instances:
-#         bbox = _bbox_from_mask(inst.mask_world)
-#         if bbox is None:
-#             continue
-
-#         x1, y1, x2, y2 = bbox
-
-#         # bbox — зеленый
-#         cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 1)
-
-#         # centroid — красный
-#         ys, xs = np.where(inst.mask_world > 0)
-#         if len(xs) > 0:
-#             cx = int(xs.mean())
-#             cy = int(ys.mean())
-#             cv2.circle(vis, (cx, cy), 2, (255, 0, 0), -1)
-
-#     cv2.imwrite("pads_placement.png", vis)
 
 def transform_image(image, angle, tx, ty, canvas_shape, centroid=None):
 

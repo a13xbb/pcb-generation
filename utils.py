@@ -220,7 +220,7 @@ def skeletonize(mask: np.ndarray) -> np.ndarray:
 
 def find_border_endpoints(
     mask: np.ndarray,
-    skeleton: np.ndarray | None = None,
+    skeleton=None,
     min_component_size: int = 3,
 ) -> List[Tuple[int, int]]:
 
@@ -435,15 +435,3 @@ def skeleton_path_length_between_endpoints(
                     heapq.heappush(pq, (nd, nx, ny))
 
     return None
-
-
-# def build_trace_segment(trace_id: str, mask: np.ndarray) -> TraceSegment:
-#     skeleton = skeletonize(mask)
-#     endpoints = find_endpoints(skeleton)
-
-#     return TraceSegment(
-#         id=trace_id,
-#         mask=mask,
-#         skeleton=skeleton,
-#         endpoints=endpoints
-#     )

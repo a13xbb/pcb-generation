@@ -6,6 +6,7 @@ import numpy as np
 from classes import *
 from placement_engine import *
 from utils import * 
+from generator import generate_layout_by_coverage, canvas_coverage
 
 def main():
     # np,random.seed(20)
@@ -20,68 +21,179 @@ def main():
     #     trash_folder="trash",
     #     min_area=200
     # )
-
-    # mask_path = "COPPER_TRACES/mask_0057.png"   # <-- путь к маске дорожки
-    # mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-
-    # skeleton = skeletonize(mask)
-
-    # Visual skeleton check
-    # overlay = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-    # overlay[skeleton > 0] = (0, 0, 255)  # skeleton красным
-
-    # cv2.imwrite("debug_mask.png", mask)
-    # cv2.imwrite("debug_skeleton.png", skeleton)
-    # cv2.imwrite("debug_overlay.png", overlay)
     
-    #Visual endpoints check
-    # vis = visualize_endpoints(mask, skeleton)
-    # cv2.imwrite("debug_endpoints.png", vis)
+    # orig_img = cv2.imread("images/example.jpg")
+    # assert orig_img is not None, "Failed to read images/example.jpg"
+
+    # # ---------- Load PAD assets ----------
+    # pads_folder = "PADS"
+    # pad_assets: list[PadAsset] = []
+
+    # pad_mask_files = [
+    #     name for name in os.listdir(pads_folder)
+    #     if name.startswith("mask") and name.endswith(".png")
+    # ]
+
+    # for name in pad_mask_files:
+    #     pad_mask = cv2.imread(os.path.join(pads_folder, name), cv2.IMREAD_GRAYSCALE)
+    #     if pad_mask is None:
+    #         continue
+
+    #     pad_mask = (pad_mask > 0).astype(np.uint8)  # 0/1
+
+    #     bbox, centroid = compute_bbox_and_centroid(pad_mask)
+    #     pad_assets.append(PadAsset(pad_mask, orig_img, centroid, bbox))
+
+    # assert len(pad_assets) > 0, "No pad assets loaded"
+
+    # # ---------- Load TRACE assets ----------
+    # traces_folder = "COPPER_TRACES"
+    # trace_assets: list[TraceAsset] = []
+
+    # trace_mask_files = sorted([
+    #     name for name in os.listdir(traces_folder)
+    #     if name.startswith("mask") and name.endswith(".png")
+    # ])
+
+    # for name in trace_mask_files:
+    #     trace_mask = cv2.imread(os.path.join(traces_folder, name), cv2.IMREAD_GRAYSCALE)
+    #     if trace_mask is None:
+    #         continue
+
+    #     trace_mask = (trace_mask > 0).astype(np.uint8)  # 0/1
+
+    #     skel = skeletonize(trace_mask)                  # ожидаем 0/1 или 0/255 — не критично, но лучше 0/1
+    #     skel = (skel > 0).astype(np.uint8)
+
+    #     endpoints = find_endpoints(trace_mask, skel)
+    #     if len(endpoints) != 2:
+    #         continue
+
+    #     length = skeleton_path_length_between_endpoints(skel, endpoints[0], endpoints[1])
+    #     if length is None:
+    #         length = 0.0
+
+    #     bbox, centroid = compute_bbox_and_centroid(trace_mask)
+
+    #     trace_assets.append(TraceAsset(trace_mask, orig_img, skel, endpoints, centroid, length))
+
+    # assert len(trace_assets) > 0, "No trace assets loaded"
+
+    # # ---------- Create canvas ----------
+    # canvas = CanvasState(600, 600)  # occupied_mask должен быть 0/1 uint8
+
+    # # ---------- Place ONE PAD ----------
+    # pad_asset = random.choice(pad_assets)
+    # pad_inst = place_pad_random(canvas, pad_asset, padding=30)
+
+    # assert pad_inst is not None, "Failed to place a pad"
+
+    # pad_inst.id = 0
+    # pad_inst.attached_traces = set()
+
+    # # ---------- Attach ONE TRACE to this PAD ----------
+    # open_ends: list[OpenEnd] = []
+    # next_trace_id = 0
+
+    # trace_asset = random.choice(trace_assets)
+    
+    # cur_pad_inst = pick_random_valid_pad(canvas, max_degree=3)
+
+    # trace_inst, attached_ep_idx = place_trace_attached_to_specific_pad(
+    #     canvas_state=canvas,
+    #     trace_asset=trace_asset,
+    #     pad=cur_pad_inst,
+    #     open_ends=open_ends,
+    #     next_trace_id=next_trace_id,
+    #     max_attempts=30,
+    #     require_touch=True
+    # )
+
+    # if trace_inst is None:
+    #     print("Failed to attach a trace to the pad (try increasing max_attempts or relaxing constraints)")
+    # else:
+    #     print("Attached trace:", trace_inst.id, "attached_end:", attached_ep_idx)
+    #     print("Open ends:", open_ends)
+
+    # # ---------- Render ----------
+    # visualize_canvas_real(canvas, "canvas.png")
+    
+    
+    
+    
+    
+    
     
     
     orig_img = cv2.imread("images/example.jpg")
-    
+    assert orig_img is not None, "Failed to read images/example.jpg"
+
+    # ---------- Load PAD assets ----------
     pads_folder = "PADS"
-    pads_masks = [cv2.imread(os.path.join(pads_folder, name), cv2.IMREAD_GRAYSCALE) for name in os.listdir(pads_folder)
-                  if name.startswith("mask") and name.endswith(".png")]
     pad_assets: list[PadAsset] = []
-    for pad_mask in pads_masks:
-        bbox, centroid = compute_bbox_and_centroid(pad_mask)
-        asset = PadAsset(pad_mask, orig_img, centroid, bbox)
-        pad_assets.append(asset)
-        
-    traces_folder = "COPPER_TRACES"
-    trace_masks = [cv2.imread(os.path.join(traces_folder, name), cv2.IMREAD_GRAYSCALE) for name in sorted(os.listdir(traces_folder))
-                  if name.startswith("mask") and name.endswith(".png")]
-    trace_assets: list[TraceAsset] = []
-    for trace_mask in trace_masks:
-        skel = skeletonize(trace_mask)
-        endpoints = find_endpoints(trace_mask, skel)
-        # cv2.imwrite(f"debug_endpoints{i}.png", visualize_endpoints(trace_mask, skel))
-        # print(endpoints)
-        if len(endpoints) == 1:
+
+    pad_mask_files = [
+        name for name in os.listdir(pads_folder)
+        if name.startswith("mask") and name.endswith(".png")
+    ]
+
+    for name in pad_mask_files:
+        pad_mask = cv2.imread(os.path.join(pads_folder, name), cv2.IMREAD_GRAYSCALE)
+        if pad_mask is None:
             continue
-        assert len(endpoints) == 2, "Invalid amount of endpoints!"
-        skel_len = skeleton_path_length_between_endpoints(skel, endpoints[0], endpoints[1])
-        if skel_len is None:
-            skel_len = 0
+
+        pad_mask = (pad_mask > 0).astype(np.uint8)  # 0/1
+
+        bbox, centroid = compute_bbox_and_centroid(pad_mask)
+        pad_assets.append(PadAsset(pad_mask, orig_img, centroid, bbox))
+
+    assert len(pad_assets) > 0, "No pad assets loaded"
+
+    # ---------- Load TRACE assets ----------
+    traces_folder = "COPPER_TRACES"
+    trace_assets: list[TraceAsset] = []
+
+    trace_mask_files = sorted([
+        name for name in os.listdir(traces_folder)
+        if name.startswith("mask") and name.endswith(".png")
+    ])
+
+    for name in trace_mask_files:
+        trace_mask = cv2.imread(os.path.join(traces_folder, name), cv2.IMREAD_GRAYSCALE)
+        if trace_mask is None:
+            continue
+
+        trace_mask = (trace_mask > 0).astype(np.uint8)  # 0/1
+
+        skel = skeletonize(trace_mask)                  # ожидаем 0/1 или 0/255 — не критично, но лучше 0/1
+        skel = (skel > 0).astype(np.uint8)
+
+        endpoints = find_endpoints(trace_mask, skel)
+        if len(endpoints) != 2:
+            continue
+
+        length = skeleton_path_length_between_endpoints(skel, endpoints[0], endpoints[1])
+        if length is None:
+            length = 0.0
+
         bbox, centroid = compute_bbox_and_centroid(trace_mask)
-        trace_asset = TraceAsset(trace_mask, orig_img, skel, endpoints, centroid, skel_len)
-        trace_assets.append(trace_asset)
-        
-        
-    # test_pad_placement(pad_assets, padding=20)
+
+        trace_assets.append(TraceAsset(trace_mask, orig_img, skel, endpoints, centroid, length))
+
+    assert len(trace_assets) > 0, "No trace assets loaded"
+    
     canvas = CanvasState(600, 600)
     
-    place_pad_random(canvas, np.random.choice(pad_assets), padding=30)
-    
-    place_trace_attached_to_pad(canvas, trace_assets[0])
-    cv2.imwrite(f"debug_skel.png", trace_assets[0].skeleton)
-    cv2.imwrite(f"debug_endpoints.png", visualize_endpoints(trace_assets[0].mask, trace_assets[0].skeleton))
+    ok = generate_layout_by_coverage(
+        canvas=canvas,
+        pad_assets=pad_assets,
+        trace_assets=trace_assets,
+        target_coverage=0.14,   # например 10%
+        padding=30
+    )
 
-    # canvas.pad_instances[0]
-    
     visualize_canvas_real(canvas, "canvas.png")
+    print("ok:", ok, "coverage:", canvas_coverage(canvas))
             
 if __name__ == "__main__":
     main()
