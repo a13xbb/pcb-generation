@@ -324,6 +324,33 @@ def count_pad_connections(pad_instance, trace_instances, radius=5):
 
     return cnt
 
+def _pick_pad_attach_point(pad: PadInstance, boundary_mix: float = 0.65):
+    ys, xs = np.where(pad.mask_world > 0)
+    if len(xs) == 0:
+        return None
+
+    cx = float(xs.mean())
+    cy = float(ys.mean())
+
+    boundary_mix = float(np.clip(boundary_mix, 0.0, 1.0))
+    if boundary_mix <= 0.0:
+        return cx, cy
+
+    mask_u8 = (pad.mask_world > 0).astype(np.uint8)
+    eroded = cv2.erode(mask_u8, np.ones((3, 3), np.uint8), iterations=1)
+    boundary = mask_u8 & (~eroded)
+
+    by, bx = np.where(boundary > 0)
+    if len(bx) == 0:
+        return cx, cy
+
+    idx = random.randrange(len(bx))
+    bxv, byv = float(bx[idx]), float(by[idx])
+
+    tx = cx + boundary_mix * (bxv - cx)
+    ty = cy + boundary_mix * (byv - cy)
+
+    return tx, ty
 
 def build_affine_align_point(mask_shape, centroid_xy, angle_deg, point_xy, target_xy):
     """
@@ -379,6 +406,7 @@ def place_trace_attached_to_specific_pad(
     angles=(0, 90, 180, 270),
     max_attempts: int = 20,
     require_touch: bool = True,
+    pad_boundary_mix: float = 0.65
 ):
     """
     Пытается приклеить trace_asset к конкретному pad_instance.
@@ -390,12 +418,9 @@ def place_trace_attached_to_specific_pad(
     
     canvas_shape = (canvas_state.h, canvas_state.w)
 
-    # pad world centroid (можно потом заменить на точку на границе пада)
-    ys, xs = np.where(pad.mask_world > 0)
-    if len(xs) == 0:
+    # Базовая точка приклейки на паде: между центроидом и границей.
+    if np.count_nonzero(pad.mask_world) == 0:
         return None, None
-    pad_world_cx = float(xs.mean())
-    pad_world_cy = float(ys.mean())
 
     # Чтобы попытки были разнообразнее:
     endpoints = list(trace_asset.endpoints)
@@ -406,13 +431,17 @@ def place_trace_attached_to_specific_pad(
         ep_local = endpoints[ep_idx]
         angle = random.choice(angles_list)
 
-        # affine: выбранный endpoint -> pad centroid
+        attach_pt = _pick_pad_attach_point(pad, boundary_mix=pad_boundary_mix)
+        if attach_pt is None:
+            continue
+
+        # affine: выбранный endpoint -> точка приклейки на pad
         M = build_affine_align_point(
             mask_shape=trace_asset.mask.shape,
             centroid_xy=trace_asset.centroid,
             angle_deg=angle,
             point_xy=ep_local,
-            target_xy=(pad_world_cx, pad_world_cy)
+            target_xy=attach_pt
         )
 
         mask_world = warp_mask_with_M(trace_asset.mask, M, canvas_shape)

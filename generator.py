@@ -186,78 +186,124 @@ def _try_place_single_path(
     padding: int,
     trace_attach_attempts: int,
     close_attempts_per_end: int,
+    debug_stats: dict | None = None,
 ):
-    """
-    Пытается построить один линейный путь длины `path_length`:
-    pad -- trace -- pad -- ... -- trace -- pad
-    Возвращает (ok, new_next_pad_id, new_next_trace_id).
-    """
-
     if path_length <= 0:
         return True, next_pad_id, next_trace_id
 
-    open_ends: list[OpenEnd] = []
     traces_by_id: dict[int, TraceInstance] = {}
 
     start_pad = place_pad_random(canvas, random.choice(pad_assets), padding=padding)
     if start_pad is None:
+        if debug_stats is not None:
+            debug_stats["fail_start_pad"] = debug_stats.get("fail_start_pad", 0) + 1
         return False, next_pad_id, next_trace_id
 
     start_pad.id = next_pad_id
     start_pad.attached_traces = set()
     next_pad_id += 1
 
-    cur_pad = start_pad
+    local_pads: dict[int, PadInstance] = {start_pad.id: start_pad}
+    end_pad_ids: set[int] = {start_pad.id}
 
+    # Строим путь сегмент за сегментом. При неудаче откатываем только текущий сегмент,
+    # а не весь уже построенный префикс пути.
     for _ in range(path_length):
-        trace_inst = None
+        segment_placed = False
+
         for _ in range(trace_attach_attempts):
+            if not end_pad_ids:
+                break
+
+            base_pad_id = random.choice(list(end_pad_ids))
+            base_pad = local_pads.get(base_pad_id)
+            if base_pad is None:
+                continue
+
+            segment_snapshot = _snapshot_canvas(canvas)
+            local_pads_snapshot = dict(local_pads)
+            end_pad_ids_snapshot = set(end_pad_ids)
+            traces_snapshot = dict(traces_by_id)
+            next_pad_id_snapshot = next_pad_id
+            next_trace_id_snapshot = next_trace_id
+
+            open_ends: list[OpenEnd] = []
+
             tr_asset = random.choice(trace_assets)
             t, _ = place_trace_attached_to_specific_pad(
                 canvas_state=canvas,
                 trace_asset=tr_asset,
-                pad=cur_pad,
+                pad=base_pad,
                 open_ends=open_ends,
                 next_trace_id=next_trace_id,
                 require_touch=True,
+                pad_boundary_mix=0.65,
             )
-            if t is not None:
-                trace_inst = t
-                break
+            if t is None:
+                _restore_canvas(canvas, segment_snapshot)
+                local_pads = local_pads_snapshot
+                end_pad_ids = end_pad_ids_snapshot
+                traces_by_id = traces_snapshot
+                next_pad_id = next_pad_id_snapshot
+                next_trace_id = next_trace_id_snapshot
+                continue
 
-        if trace_inst is None:
+            traces_by_id[t.id] = t
+            next_trace_id += 1
+
+            open_end = next((oe for oe in open_ends if oe.trace_id == t.id), None)
+            if open_end is None:
+                if debug_stats is not None:
+                    debug_stats["fail_open_end_missing"] = debug_stats.get("fail_open_end_missing", 0) + 1
+                _restore_canvas(canvas, segment_snapshot)
+                local_pads = local_pads_snapshot
+                end_pad_ids = end_pad_ids_snapshot
+                traces_by_id = traces_snapshot
+                next_pad_id = next_pad_id_snapshot
+                next_trace_id = next_trace_id_snapshot
+                continue
+
+            new_pad = None
+            for _ in range(close_attempts_per_end):
+                p_asset = random.choice(pad_assets)
+                p_inst, next_pad_candidate = place_pad_attached_to_open_end(
+                    canvas_state=canvas,
+                    pad_asset=p_asset,
+                    open_end=open_end,
+                    open_ends=open_ends,
+                    traces_by_id=traces_by_id,
+                    next_pad_id=next_pad_id,
+                    angles=(0, 90, 180, 270),
+                    max_attempts=20,
+                    require_touch=True,
+                )
+                if p_inst is not None:
+                    new_pad = p_inst
+                    next_pad_id = next_pad_candidate
+                    break
+
+            if new_pad is None:
+                _restore_canvas(canvas, segment_snapshot)
+                local_pads = local_pads_snapshot
+                end_pad_ids = end_pad_ids_snapshot
+                traces_by_id = traces_snapshot
+                next_pad_id = next_pad_id_snapshot
+                next_trace_id = next_trace_id_snapshot
+                continue
+
+            local_pads[new_pad.id] = new_pad
+
+            if base_pad_id in end_pad_ids:
+                end_pad_ids.remove(base_pad_id)
+            end_pad_ids.add(new_pad.id)
+
+            segment_placed = True
+            break
+
+        if not segment_placed:
+            if debug_stats is not None:
+                debug_stats["fail_trace_attach"] = debug_stats.get("fail_trace_attach", 0) + 1
             return False, next_pad_id, next_trace_id
-
-        traces_by_id[trace_inst.id] = trace_inst
-        next_trace_id += 1
-
-        open_end = next((oe for oe in open_ends if oe.trace_id == trace_inst.id), None)
-        if open_end is None:
-            return False, next_pad_id, next_trace_id
-
-        new_pad = None
-        for _ in range(close_attempts_per_end):
-            p_asset = random.choice(pad_assets)
-            p_inst, next_pad_candidate = place_pad_attached_to_open_end(
-                canvas_state=canvas,
-                pad_asset=p_asset,
-                open_end=open_end,
-                open_ends=open_ends,
-                traces_by_id=traces_by_id,
-                next_pad_id=next_pad_id,
-                angles=(0, 90, 180, 270),
-                max_attempts=20,
-                require_touch=True,
-            )
-            if p_inst is not None:
-                new_pad = p_inst
-                next_pad_id = next_pad_candidate
-                break
-
-        if new_pad is None:
-            return False, next_pad_id, next_trace_id
-
-        cur_pad = new_pad
 
     return True, next_pad_id, next_trace_id
 
@@ -273,19 +319,22 @@ def generate_layout_by_path_plan(
     trace_attach_attempts: int = 30,
     close_attempts_per_end: int = 80,
     strict_plan: bool = False,
+    debug_log: bool = False,
 ):
-    """
-    Детерминированный по структуре генератор:
-    1) размещает заданное количество путей каждой длины;
-    2) затем добавляет отдельные (изолированные) пады.
-
-    path_length_counts пример: {3: 3, 2: 4, 1: 6}
-    strict_plan=False: best-effort, не обнуляет холст, если полный план не влез.
-    """
-
     next_pad_id = 0
     next_trace_id = 0
     total_placed_paths = 0
+    global_debug = {
+        "path_attempts": 0,
+        "path_success": 0,
+        "path_failed": 0,
+        "fail_start_pad": 0,
+        "fail_trace_attach": 0,
+        "fail_open_end_missing": 0,
+        "fail_close_end_with_pad": 0,
+        "isolated_pads_requested": max(0, int(isolated_pads)),
+        "isolated_pads_placed": 0,
+    }
 
     for path_len in sorted(path_length_counts.keys(), reverse=True):
         cnt = int(path_length_counts[path_len])
@@ -296,6 +345,7 @@ def generate_layout_by_path_plan(
         for _ in range(cnt):
             placed = False
             for _ in range(max_path_attempts):
+                global_debug["path_attempts"] += 1
                 snapshot = _snapshot_canvas(canvas)
 
                 ok, new_next_pad_id, new_next_trace_id = _try_place_single_path(
@@ -308,6 +358,7 @@ def generate_layout_by_path_plan(
                     padding=padding,
                     trace_attach_attempts=trace_attach_attempts,
                     close_attempts_per_end=close_attempts_per_end,
+                    debug_stats=global_debug,
                 )
 
                 if ok:
@@ -316,12 +367,19 @@ def generate_layout_by_path_plan(
                     placed = True
                     placed_for_this_len += 1
                     total_placed_paths += 1
+                    global_debug["path_success"] += 1
                     break
 
                 _restore_canvas(canvas, snapshot)
 
+            if not placed:
+                global_debug["path_failed"] += 1
+
             if not placed and strict_plan:
                 _rebuild_occupied_mask(canvas)
+                if debug_log:
+                    print("[path-plan][debug] strict failure")
+                    print("[path-plan][debug]", global_debug)
                 return False
 
         if strict_plan and placed_for_this_len < cnt:
@@ -335,6 +393,9 @@ def generate_layout_by_path_plan(
         p.id = next_pad_id
         p.attached_traces = set()
         next_pad_id += 1
+        global_debug["isolated_pads_placed"] += 1
 
     _rebuild_occupied_mask(canvas)
+    if debug_log:
+        print("[path-plan][debug]", global_debug)
     return total_placed_paths > 0 or len(canvas.pad_instances) > 0

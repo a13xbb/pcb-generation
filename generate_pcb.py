@@ -193,9 +193,9 @@ def main():
     # )
     
     path_plan = {
-        3: 2,
-        2: 5,   # 4 пути длины 2
-        1: 6,   # 6 путей длины 1
+        3: 3,
+        2: 4,
+        1: 6
     }
 
     ok = generate_layout_by_path_plan(
@@ -203,10 +203,10 @@ def main():
         pad_assets=pad_assets,
         trace_assets=trace_assets,
         path_length_counts=path_plan,
-        isolated_pads=8,
+        isolated_pads=10,
         padding=30,
-        max_path_attempts=100,
-        trace_attach_attempts=30,
+        max_path_attempts=200,
+        trace_attach_attempts=40,
         close_attempts_per_end=100,
     )
 
