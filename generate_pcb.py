@@ -6,7 +6,7 @@ import numpy as np
 from classes import *
 from placement_engine import *
 from utils import * 
-from generator import generate_layout_by_coverage, canvas_coverage
+from generator import generate_layout_by_coverage, generate_layout_by_path_plan, canvas_coverage
 
 def main():
     # np,random.seed(20)
@@ -182,14 +182,32 @@ def main():
 
     assert len(trace_assets) > 0, "No trace assets loaded"
     
-    canvas = CanvasState(600, 600)
+    canvas = CanvasState(1000, 1000)
     
-    ok = generate_layout_by_coverage(
+    # ok = generate_layout_by_coverage(
+    #     canvas=canvas,
+    #     pad_assets=pad_assets,
+    #     trace_assets=trace_assets,
+    #     target_coverage=0.14,   # например 10%
+    #     padding=30
+    # )
+    
+    path_plan = {
+        3: 2,
+        2: 5,   # 4 пути длины 2
+        1: 6,   # 6 путей длины 1
+    }
+
+    ok = generate_layout_by_path_plan(
         canvas=canvas,
         pad_assets=pad_assets,
         trace_assets=trace_assets,
-        target_coverage=0.14,   # например 10%
-        padding=30
+        path_length_counts=path_plan,
+        isolated_pads=8,
+        padding=30,
+        max_path_attempts=100,
+        trace_attach_attempts=30,
+        close_attempts_per_end=100,
     )
 
     visualize_canvas_real(canvas, "canvas.png")

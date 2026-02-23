@@ -153,3 +153,188 @@ def generate_layout_by_coverage(
         return False
 
     return True
+
+def _rebuild_occupied_mask(canvas: CanvasState):
+    canvas.occupied_mask[:] = 0
+    for tr in canvas.trace_instances:
+        canvas.occupied_mask |= (tr.mask_world > 0).astype(np.uint8)
+    for pad in canvas.pad_instances:
+        canvas.occupied_mask |= (pad.mask_world > 0).astype(np.uint8)
+
+
+def _snapshot_canvas(canvas: CanvasState):
+    return {
+        "occupied_mask": canvas.occupied_mask.copy(),
+        "pad_instances": list(canvas.pad_instances),
+        "trace_instances": list(canvas.trace_instances),
+    }
+
+
+def _restore_canvas(canvas: CanvasState, snapshot):
+    canvas.occupied_mask = snapshot["occupied_mask"]
+    canvas.pad_instances = snapshot["pad_instances"]
+    canvas.trace_instances = snapshot["trace_instances"]
+
+
+def _try_place_single_path(
+    canvas: CanvasState,
+    pad_assets: list,
+    trace_assets: list,
+    path_length: int,
+    next_pad_id: int,
+    next_trace_id: int,
+    padding: int,
+    trace_attach_attempts: int,
+    close_attempts_per_end: int,
+):
+    """
+    Пытается построить один линейный путь длины `path_length`:
+    pad -- trace -- pad -- ... -- trace -- pad
+    Возвращает (ok, new_next_pad_id, new_next_trace_id).
+    """
+
+    if path_length <= 0:
+        return True, next_pad_id, next_trace_id
+
+    open_ends: list[OpenEnd] = []
+    traces_by_id: dict[int, TraceInstance] = {}
+
+    start_pad = place_pad_random(canvas, random.choice(pad_assets), padding=padding)
+    if start_pad is None:
+        return False, next_pad_id, next_trace_id
+
+    start_pad.id = next_pad_id
+    start_pad.attached_traces = set()
+    next_pad_id += 1
+
+    cur_pad = start_pad
+
+    for _ in range(path_length):
+        trace_inst = None
+        for _ in range(trace_attach_attempts):
+            tr_asset = random.choice(trace_assets)
+            t, _ = place_trace_attached_to_specific_pad(
+                canvas_state=canvas,
+                trace_asset=tr_asset,
+                pad=cur_pad,
+                open_ends=open_ends,
+                next_trace_id=next_trace_id,
+                require_touch=True,
+            )
+            if t is not None:
+                trace_inst = t
+                break
+
+        if trace_inst is None:
+            return False, next_pad_id, next_trace_id
+
+        traces_by_id[trace_inst.id] = trace_inst
+        next_trace_id += 1
+
+        open_end = next((oe for oe in open_ends if oe.trace_id == trace_inst.id), None)
+        if open_end is None:
+            return False, next_pad_id, next_trace_id
+
+        new_pad = None
+        for _ in range(close_attempts_per_end):
+            p_asset = random.choice(pad_assets)
+            p_inst, next_pad_candidate = place_pad_attached_to_open_end(
+                canvas_state=canvas,
+                pad_asset=p_asset,
+                open_end=open_end,
+                open_ends=open_ends,
+                traces_by_id=traces_by_id,
+                next_pad_id=next_pad_id,
+                angles=(0, 90, 180, 270),
+                max_attempts=20,
+                require_touch=True,
+            )
+            if p_inst is not None:
+                new_pad = p_inst
+                next_pad_id = next_pad_candidate
+                break
+
+        if new_pad is None:
+            return False, next_pad_id, next_trace_id
+
+        cur_pad = new_pad
+
+    return True, next_pad_id, next_trace_id
+
+
+def generate_layout_by_path_plan(
+    canvas: CanvasState,
+    pad_assets: list,
+    trace_assets: list,
+    path_length_counts: dict[int, int],
+    isolated_pads: int = 0,
+    padding: int = 30,
+    max_path_attempts: int = 80,
+    trace_attach_attempts: int = 30,
+    close_attempts_per_end: int = 80,
+    strict_plan: bool = False,
+):
+    """
+    Детерминированный по структуре генератор:
+    1) размещает заданное количество путей каждой длины;
+    2) затем добавляет отдельные (изолированные) пады.
+
+    path_length_counts пример: {3: 3, 2: 4, 1: 6}
+    strict_plan=False: best-effort, не обнуляет холст, если полный план не влез.
+    """
+
+    next_pad_id = 0
+    next_trace_id = 0
+    total_placed_paths = 0
+
+    for path_len in sorted(path_length_counts.keys(), reverse=True):
+        cnt = int(path_length_counts[path_len])
+        if path_len <= 0 or cnt <= 0:
+            continue
+
+        placed_for_this_len = 0
+        for _ in range(cnt):
+            placed = False
+            for _ in range(max_path_attempts):
+                snapshot = _snapshot_canvas(canvas)
+
+                ok, new_next_pad_id, new_next_trace_id = _try_place_single_path(
+                    canvas=canvas,
+                    pad_assets=pad_assets,
+                    trace_assets=trace_assets,
+                    path_length=path_len,
+                    next_pad_id=next_pad_id,
+                    next_trace_id=next_trace_id,
+                    padding=padding,
+                    trace_attach_attempts=trace_attach_attempts,
+                    close_attempts_per_end=close_attempts_per_end,
+                )
+
+                if ok:
+                    next_pad_id = new_next_pad_id
+                    next_trace_id = new_next_trace_id
+                    placed = True
+                    placed_for_this_len += 1
+                    total_placed_paths += 1
+                    break
+
+                _restore_canvas(canvas, snapshot)
+
+            if not placed and strict_plan:
+                _rebuild_occupied_mask(canvas)
+                return False
+
+        if strict_plan and placed_for_this_len < cnt:
+            _rebuild_occupied_mask(canvas)
+            return False
+
+    for _ in range(max(0, int(isolated_pads))):
+        p = place_pad_random(canvas, random.choice(pad_assets), padding=padding)
+        if p is None:
+            continue
+        p.id = next_pad_id
+        p.attached_traces = set()
+        next_pad_id += 1
+
+    _rebuild_occupied_mask(canvas)
+    return total_placed_paths > 0 or len(canvas.pad_instances) > 0
