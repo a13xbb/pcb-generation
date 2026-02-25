@@ -7,6 +7,7 @@ from classes import *
 from placement_engine import *
 from utils import * 
 from generator import generate_layout_by_coverage, generate_layout_by_path_plan, canvas_coverage
+from pad_classifier import classify_pad_shape
 
 def main():
     # np,random.seed(20)
