@@ -1,3 +1,4 @@
+import cv2
 import random
 import numpy as np
 
@@ -156,15 +157,29 @@ def generate_layout_by_coverage(
 
 def _rebuild_occupied_mask(canvas: CanvasState):
     canvas.occupied_mask[:] = 0
+    if hasattr(canvas, "pad_keepout_mask"):
+        canvas.pad_keepout_mask[:] = 0
+    
     for tr in canvas.trace_instances:
         canvas.occupied_mask |= (tr.mask_world > 0).astype(np.uint8)
+        
+    pad_keepout_radius = int(getattr(canvas, "pad_keepout_radius", 0))
+    keepout_kernel = None
+    if pad_keepout_radius > 0:
+        k = 2 * pad_keepout_radius + 1
+        keepout_kernel = np.ones((k, k), dtype=np.uint8)
+    
     for pad in canvas.pad_instances:
-        canvas.occupied_mask |= (pad.mask_world > 0).astype(np.uint8)
+        pad_binary = (pad.mask_world > 0).astype(np.uint8)
+        canvas.occupied_mask |= pad_binary
+        if keepout_kernel is not None:
+            canvas.pad_keepout_mask |= cv2.dilate(pad_binary, keepout_kernel, iterations=1)
 
 
 def _snapshot_canvas(canvas: CanvasState):
     return {
         "occupied_mask": canvas.occupied_mask.copy(),
+        "pad_keepout_mask": canvas.pad_keepout_mask.copy(),
         "pad_instances": list(canvas.pad_instances),
         "trace_instances": list(canvas.trace_instances),
     }
@@ -172,6 +187,7 @@ def _snapshot_canvas(canvas: CanvasState):
 
 def _restore_canvas(canvas: CanvasState, snapshot):
     canvas.occupied_mask = snapshot["occupied_mask"]
+    canvas.pad_keepout_mask = snapshot["pad_keepout_mask"]
     canvas.pad_instances = snapshot["pad_instances"]
     canvas.trace_instances = snapshot["trace_instances"]
 

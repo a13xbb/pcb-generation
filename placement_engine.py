@@ -60,6 +60,56 @@ def check_collision(canvas_mask, new_mask):
     return np.any((canvas_mask > 0) & (new_mask > 0))
 
 
+def _dilate_binary_mask(mask: np.ndarray, radius: int) -> np.ndarray:
+    radius = int(max(0, radius))
+    if radius <= 0:
+        return (mask > 0).astype(np.uint8)
+
+    kernel_size = 2 * radius + 1
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+    return cv2.dilate((mask > 0).astype(np.uint8), kernel, iterations=1)
+
+
+def _update_pad_keepout(canvas_state: CanvasState, pad_mask_world: np.ndarray):
+    radius = int(getattr(canvas_state, "pad_keepout_radius", 0))
+    if radius <= 0:
+        return
+
+    expanded = _dilate_binary_mask(pad_mask_world, radius)
+    canvas_state.pad_keepout_mask |= expanded
+    
+
+def _find_pad_instance_by_id(canvas_state: CanvasState, pad_id: int | None):
+    if pad_id is None:
+        return None
+
+    for pad in canvas_state.pad_instances:
+        if pad.id == pad_id:
+            return pad
+
+    return None
+
+
+def _can_place_without_pad_keepout_conflict(
+    canvas_state: CanvasState,
+    candidate_mask: np.ndarray,
+    allowed_overlap_mask: np.ndarray | None = None
+) -> bool:
+    radius = int(getattr(canvas_state, "pad_keepout_radius", 0))
+    if radius <= 0:
+        return True
+
+    keepout_mask = getattr(canvas_state, "pad_keepout_mask", None)
+    if keepout_mask is None:
+        return True
+
+    conflict = (candidate_mask > 0) & (keepout_mask > 0)
+    if allowed_overlap_mask is not None:
+        conflict &= ~(allowed_overlap_mask > 0)
+
+    return not np.any(conflict)
+
+
 def _bbox_from_mask(mask: np.ndarray):
     ys, xs = np.where(mask > 0)
     if len(xs) == 0:
@@ -122,6 +172,9 @@ def place_pad_random(
         if check_collision(canvas.occupied_mask, mask_world):
             continue
 
+        if not _can_place_without_pad_keepout_conflict(canvas, mask_world):
+            continue
+
         bbox = _bbox_from_mask(mask_world)
         if bbox is None:
             continue
@@ -144,6 +197,7 @@ def place_pad_random(
 
         # --- 7. Размещение ---
         canvas.occupied_mask |= (mask_world > 0).astype(np.uint8)
+        _update_pad_keepout(canvas, mask_world)
 
         inst = PadInstance(
             pad_asset,
@@ -226,6 +280,19 @@ def place_pad_attached_to_open_end(
         if require_touch:
             if not np.any((pad_mask_world > 0) & (tr.mask_world > 0)):
                 continue
+        
+        source_pad_mask = tr.mask_world
+        source_pad_id = tr.pad_end[1 - open_end.end_idx]
+        source_pad = _find_pad_instance_by_id(canvas_state, source_pad_id)
+        if source_pad is not None:
+            source_pad_mask = (source_pad_mask > 0) | (source_pad.mask_world > 0)
+            
+        if not _can_place_without_pad_keepout_conflict(
+            canvas_state,
+            pad_mask_world,
+            allowed_overlap_mask=source_pad_mask
+        ):
+            continue
 
         # 2) Коллизии: запрещаем пересечение со всем, кроме этого trace
         # Разрешаем overlap с trace (tr.mask_world), но не с остальным occupied
@@ -263,6 +330,7 @@ def place_pad_attached_to_open_end(
         # коммит в canvas
         canvas_state.pad_instances.append(pad_inst)
         canvas_state.occupied_mask |= pad_mask_world
+        _update_pad_keepout(canvas_state, pad_mask_world)
 
         # закрываем open end
         try:

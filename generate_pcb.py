@@ -183,7 +183,7 @@ def main():
 
     assert len(trace_assets) > 0, "No trace assets loaded"
     
-    canvas = CanvasState(1000, 1000)
+    canvas = CanvasState(1000, 1000, pad_keepout_radius=18)
     
     # ok = generate_layout_by_coverage(
     #     canvas=canvas,
@@ -194,7 +194,7 @@ def main():
     # )
     
     path_plan = {
-        3: 3,
+        3: 2,
         2: 4,
         1: 6
     }
@@ -204,7 +204,7 @@ def main():
         pad_assets=pad_assets,
         trace_assets=trace_assets,
         path_length_counts=path_plan,
-        isolated_pads=10,
+        isolated_pads=8,
         padding=30,
         max_path_attempts=200,
         trace_attach_attempts=40,

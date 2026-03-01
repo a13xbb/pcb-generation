@@ -51,11 +51,13 @@ class OpenEnd:
     pos_xy: Tuple[int, int]
     
 class CanvasState:
-    def __init__(self, h, w):
+    def __init__(self, h, w, pad_keepout_radius: int = 0):
         self.h = h
         self.w = w
 
         self.occupied_mask = np.zeros((h, w), np.uint8)
+        self.pad_keepout_radius = max(0, int(pad_keepout_radius))
+        self.pad_keepout_mask = np.zeros((h, w), np.uint8)
 
         self.pad_instances = []
         self.trace_instances = []
