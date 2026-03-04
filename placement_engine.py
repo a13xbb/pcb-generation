@@ -122,6 +122,25 @@ def _bbox_from_mask(mask: np.ndarray):
     return xs.min(), ys.min(), xs.max(), ys.max()  # x1,y1,x2,y2
 
 
+def _fits_inside_edge_padding(mask: np.ndarray, canvas_shape: tuple[int, int], edge_padding: int) -> bool:
+    padding = max(0, int(edge_padding))
+    if padding <= 0:
+        return cv2.countNonZero(mask) > 0
+
+    bbox = _bbox_from_mask(mask)
+    if bbox is None:
+        return False
+
+    x1, y1, x2, y2 = bbox
+    h, w = canvas_shape
+    return (
+        x1 >= padding and
+        y1 >= padding and
+        x2 <= (w - 1 - padding) and
+        y2 <= (h - 1 - padding)
+    )
+
+
 def _ensure_pad_attach_cache(pad: PadInstance):
     if getattr(pad, "_attach_cache_ready", False):
         return
@@ -176,13 +195,16 @@ def place_pad_random(
     padding: int = 10,
     min_asset_distance: int = 5,
     max_tries: int = 50):
-    
+    edge_padding = max(0, int(padding))
+    if canvas.w - edge_padding <= edge_padding or canvas.h - edge_padding <= edge_padding:
+        return None
+
     for _ in range(max_tries):
         # angle = random.choice([0, 90, 180, 270])
         angle = 0
 
-        tx = np.random.randint(padding, canvas.w - padding)
-        ty = np.random.randint(padding, canvas.h - padding)
+        tx = np.random.randint(edge_padding, canvas.w - edge_padding)
+        ty = np.random.randint(edge_padding, canvas.h - edge_padding)
 
         mask_world, M = transform_mask(
             pad_asset.mask,
@@ -206,6 +228,9 @@ def place_pad_random(
             raise ValueError(f"Unsupported mask dimensionality: {mask_world.ndim}D (shape: {mask_world.shape})")
 
         mask_world_u8 = (mask_world > 0).astype(np.uint8)
+        if not _fits_inside_edge_padding(mask_world_u8, (canvas.h, canvas.w), edge_padding):
+            continue
+
         if check_collision(canvas.occupied_mask, mask_world_u8):
             continue
 
@@ -263,7 +288,8 @@ def place_pad_attached_to_open_end(
     next_pad_id: int,
     angles=(0, 90, 180, 270),
     max_attempts: int = 20,
-    require_touch: bool = True
+    require_touch: bool = True,
+    edge_padding: int = 0,
 ):
     """
     Пытается разместить pad так, чтобы он приклеился к open_end (концу существующего трейса).
@@ -317,6 +343,9 @@ def place_pad_attached_to_open_end(
         pad_mask_world_u8 = (pad_mask_world > 0).astype(np.uint8)  # 0/1
 
         if cv2.countNonZero(pad_mask_world_u8) == 0:
+            continue
+
+        if not _fits_inside_edge_padding(pad_mask_world_u8, canvas_shape, edge_padding):
             continue
 
         # 1) Требуем контакт с трейсом (иначе можно “приклеить” рядом)
@@ -519,7 +548,8 @@ def place_trace_attached_to_specific_pad(
     angles=(0, 90, 180, 270),
     max_attempts: int = 20,
     require_touch: bool = True,
-    pad_boundary_mix: float = 0.65
+    pad_boundary_mix: float = 0.65,
+    edge_padding: int = 0,
 ):
     """
     Пытается приклеить trace_asset к конкретному pad_instance.
@@ -566,6 +596,9 @@ def place_trace_attached_to_specific_pad(
             continue
         mask_world_u8 = (mask_world > 0).astype(np.uint8)
         if cv2.countNonZero(mask_world_u8) == 0:
+            continue
+
+        if not _fits_inside_edge_padding(mask_world_u8, canvas_shape, edge_padding):
             continue
 
         # endpoints world
@@ -628,6 +661,7 @@ def place_trace_attached_to_pad(
     angles=(0, 90, 180, 270),
     max_attempts_pad_pick: int = 20,
     max_attempts_attach: int = 20,
+    edge_padding: int = 0,
 ):
     """
     Старая семантика: сам выбирает валидный pad и пытается к нему приклеить trace.
@@ -641,7 +675,8 @@ def place_trace_attached_to_pad(
             trace_asset,
             pad,
             angles=angles,
-            max_attempts=max_attempts_attach
+            max_attempts=max_attempts_attach,
+            edge_padding=edge_padding,
         )
         if inst is not None:
             return inst, ep_idx

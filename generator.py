@@ -54,7 +54,8 @@ def generate_layout_by_coverage(
         pad=p0,
         open_ends=open_ends,
         next_trace_id=next_trace_id,
-        require_touch=True
+        require_touch=True,
+        edge_padding=padding,
     )
     if t0 is not None:
         traces_by_id[t0.id] = t0
@@ -95,7 +96,8 @@ def generate_layout_by_coverage(
                 next_pad_id=next_pad_id,
                 angles=(0, 90, 180, 270),
                 max_attempts=20,
-                require_touch=True
+                require_touch=True,
+                edge_padding=padding,
             )
             if p_new is not None:
                 next_pad_id = next_pad_id2
@@ -114,7 +116,8 @@ def generate_layout_by_coverage(
             pad=pad,
             open_ends=open_ends,
             next_trace_id=next_trace_id,
-            require_touch=True
+            require_touch=True,
+            edge_padding=padding,
         )
         if t is not None:
             traces_by_id[t.id] = t
@@ -141,7 +144,8 @@ def generate_layout_by_coverage(
                 next_pad_id=next_pad_id,
                 angles=(0, 90, 180, 270),
                 max_attempts=20,
-                require_touch=True
+                require_touch=True,
+                edge_padding=padding,
             )
             if p_new is not None:
                 next_pad_id = next_pad_id2
@@ -261,6 +265,7 @@ def _try_place_single_path(
                 next_trace_id=next_trace_id,
                 require_touch=True,
                 pad_boundary_mix=0.65,
+                edge_padding=padding,
             )
             if t is None:
                 _restore_canvas(canvas, segment_snapshot)
@@ -299,6 +304,7 @@ def _try_place_single_path(
                     angles=(0, 90, 180, 270),
                     max_attempts=20,
                     require_touch=True,
+                    edge_padding=padding,
                 )
                 if p_inst is not None:
                     new_pad = p_inst
