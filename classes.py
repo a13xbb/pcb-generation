@@ -28,12 +28,18 @@ class Transform:
         self.ty = ty
         
 class PadInstance:
-    def __init__(self, asset, transform, mask_world, id=None):
+    def __init__(self, asset, transform, mask_world, id=None, bbox_world=None):
         self.asset = asset
         self.transform = transform
         self.mask_world = mask_world
         self.id = id
+        self.bbox_world = bbox_world
         self.attached_traces = set()
+        # Lazy caches for placement hot paths.
+        self._mask_world_u8 = None
+        self._attach_center = None
+        self._attach_boundary = None
+        self._attach_cache_ready = False
         
 class TraceInstance:
     def __init__(self, asset, transform, mask_world, endpoints_world, id=None):
@@ -61,4 +67,17 @@ class CanvasState:
 
         self.pad_instances = []
         self.trace_instances = []
+        self.pad_by_id = {}
+
+    def register_pad(self, pad: PadInstance):
+        if pad.id is None:
+            return
+        self.pad_by_id[pad.id] = pad
+
+    def rebuild_pad_index(self):
+        self.pad_by_id = {
+            pad.id: pad
+            for pad in self.pad_instances
+            if pad.id is not None
+        }
         

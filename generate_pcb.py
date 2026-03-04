@@ -2,6 +2,7 @@ import os
 import cv2
 import shutil
 import numpy as np
+import time
 
 from classes import *
 from placement_engine import *
@@ -199,18 +200,21 @@ def main():
         1: 6
     }
 
+    start = time.time()
     ok = generate_layout_by_path_plan(
         canvas=canvas,
         pad_assets=pad_assets,
         trace_assets=trace_assets,
         path_length_counts=path_plan,
         isolated_pads=8,
-        padding=30,
+        padding=20,
         max_path_attempts=200,
         trace_attach_attempts=40,
         close_attempts_per_end=100,
     )
+    end = time.time()
 
+    print(f"Time elapsed: {end - start}")
     visualize_canvas_real(canvas, "canvas.png")
     print("ok:", ok, "coverage:", canvas_coverage(canvas))
             

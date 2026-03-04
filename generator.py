@@ -45,6 +45,7 @@ def generate_layout_by_coverage(
     p0.id = next_pad_id
     next_pad_id += 1
     p0.attached_traces = set()
+    canvas.register_pad(p0)
 
     # ---------- seed: one trace from p0 ----------
     t0, attached_ep = place_trace_attached_to_specific_pad(
@@ -71,6 +72,7 @@ def generate_layout_by_coverage(
                 p.id = next_pad_id
                 next_pad_id += 1
                 p.attached_traces = set()
+                canvas.register_pad(p)
             continue
 
         # 2) если есть открытые концы — чаще закрываем их падом
@@ -174,6 +176,8 @@ def _rebuild_occupied_mask(canvas: CanvasState):
         canvas.occupied_mask |= pad_binary
         if keepout_kernel is not None:
             canvas.pad_keepout_mask |= cv2.dilate(pad_binary, keepout_kernel, iterations=1)
+    if hasattr(canvas, "rebuild_pad_index"):
+        canvas.rebuild_pad_index()
 
 
 def _snapshot_canvas(canvas: CanvasState):
@@ -182,6 +186,7 @@ def _snapshot_canvas(canvas: CanvasState):
         "pad_keepout_mask": canvas.pad_keepout_mask.copy(),
         "pad_instances": list(canvas.pad_instances),
         "trace_instances": list(canvas.trace_instances),
+        "pad_by_id": dict(getattr(canvas, "pad_by_id", {})),
     }
 
 
@@ -190,6 +195,7 @@ def _restore_canvas(canvas: CanvasState, snapshot):
     canvas.pad_keepout_mask = snapshot["pad_keepout_mask"]
     canvas.pad_instances = snapshot["pad_instances"]
     canvas.trace_instances = snapshot["trace_instances"]
+    canvas.pad_by_id = snapshot.get("pad_by_id", {})
 
 
 def _try_place_single_path(
@@ -218,6 +224,7 @@ def _try_place_single_path(
     start_pad.id = next_pad_id
     start_pad.attached_traces = set()
     next_pad_id += 1
+    canvas.register_pad(start_pad)
 
     local_pads: dict[int, PadInstance] = {start_pad.id: start_pad}
     end_pad_ids: set[int] = {start_pad.id}
@@ -409,6 +416,7 @@ def generate_layout_by_path_plan(
         p.id = next_pad_id
         p.attached_traces = set()
         next_pad_id += 1
+        canvas.register_pad(p)
         global_debug["isolated_pads_placed"] += 1
 
     _rebuild_occupied_mask(canvas)
