@@ -1,12 +1,13 @@
 import numpy as np
 import random
 import cv2
-import matplotlib.pyplot as plt
 
 from classes import *
 #--------------------------------------------------------------------------------
 # HELPER FUNCTIONS
 #--------------------------------------------------------------------------------
+
+_ERODE_KERNEL_3X3 = np.ones((3, 3), np.uint8)
 
 def transform_mask(mask, angle, tx, ty, canvas_shape, centroid=None):
     """
@@ -57,7 +58,61 @@ def transform_points(points, M):
 
 
 def check_collision(canvas_mask, new_mask):
-    return np.any((canvas_mask > 0) & (new_mask > 0))
+    overlap = cv2.bitwise_and(canvas_mask, new_mask)
+    return cv2.countNonZero(overlap) > 0
+
+
+def _dilate_binary_mask(mask: np.ndarray, radius: int) -> np.ndarray:
+    radius = int(max(0, radius))
+    if radius <= 0:
+        return (mask > 0).astype(np.uint8)
+
+    kernel_size = 2 * radius + 1
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+    return cv2.dilate((mask > 0).astype(np.uint8), kernel, iterations=1)
+
+
+def _update_pad_keepout(canvas_state: CanvasState, pad_mask_world: np.ndarray):
+    radius = int(getattr(canvas_state, "pad_keepout_radius", 0))
+    if radius <= 0:
+        return
+
+    expanded = _dilate_binary_mask(pad_mask_world, radius)
+    canvas_state.pad_keepout_mask |= expanded
+    
+
+def _find_pad_instance_by_id(canvas_state: CanvasState, pad_id: int | None):
+    if pad_id is None:
+        return None
+    by_id = getattr(canvas_state, "pad_by_id", None)
+    if by_id is not None:
+        pad = by_id.get(pad_id)
+        if pad is not None:
+            return pad
+    for pad in canvas_state.pad_instances:
+        if pad.id == pad_id:
+            return pad
+    return None
+
+
+def _can_place_without_pad_keepout_conflict(
+    canvas_state: CanvasState,
+    candidate_mask: np.ndarray,
+    allowed_overlap_mask: np.ndarray | None = None
+) -> bool:
+    radius = int(getattr(canvas_state, "pad_keepout_radius", 0))
+    if radius <= 0:
+        return True
+
+    keepout_mask = getattr(canvas_state, "pad_keepout_mask", None)
+    if keepout_mask is None:
+        return True
+
+    conflict = cv2.bitwise_and(candidate_mask, keepout_mask)
+    if allowed_overlap_mask is not None:
+        conflict = cv2.bitwise_and(conflict, cv2.bitwise_not(allowed_overlap_mask))
+
+    return cv2.countNonZero(conflict) == 0
 
 
 def _bbox_from_mask(mask: np.ndarray):
@@ -65,6 +120,56 @@ def _bbox_from_mask(mask: np.ndarray):
     if len(xs) == 0:
         return None
     return xs.min(), ys.min(), xs.max(), ys.max()  # x1,y1,x2,y2
+
+
+def _fits_inside_edge_padding(mask: np.ndarray, canvas_shape: tuple[int, int], edge_padding: int) -> bool:
+    padding = max(0, int(edge_padding))
+    if padding <= 0:
+        return cv2.countNonZero(mask) > 0
+
+    bbox = _bbox_from_mask(mask)
+    if bbox is None:
+        return False
+
+    x1, y1, x2, y2 = bbox
+    h, w = canvas_shape
+    return (
+        x1 >= padding and
+        y1 >= padding and
+        x2 <= (w - 1 - padding) and
+        y2 <= (h - 1 - padding)
+    )
+
+
+def _ensure_pad_attach_cache(pad: PadInstance):
+    if getattr(pad, "_attach_cache_ready", False):
+        return
+
+    mask_u8 = getattr(pad, "_mask_world_u8", None)
+    if mask_u8 is None:
+        mask_u8 = (pad.mask_world > 0).astype(np.uint8)
+        pad._mask_world_u8 = mask_u8
+
+    ys, xs = np.where(mask_u8 > 0)
+    if len(xs) == 0:
+        pad._attach_center = None
+        pad._attach_boundary = None
+        pad._attach_cache_ready = True
+        return
+
+    if getattr(pad, "bbox_world", None) is None:
+        pad.bbox_world = (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
+
+    cx = float(xs.mean())
+    cy = float(ys.mean())
+
+    eroded = cv2.erode(mask_u8, _ERODE_KERNEL_3X3, iterations=1)
+    boundary = cv2.bitwise_and(mask_u8, cv2.bitwise_not(eroded))
+    by, bx = np.where(boundary > 0)
+
+    pad._attach_center = (cx, cy)
+    pad._attach_boundary = (bx, by)
+    pad._attach_cache_ready = True
 
 
 def _bbox_distance(b1, b2):
@@ -90,13 +195,16 @@ def place_pad_random(
     padding: int = 10,
     min_asset_distance: int = 5,
     max_tries: int = 50):
-    
+    edge_padding = max(0, int(padding))
+    if canvas.w - edge_padding <= edge_padding or canvas.h - edge_padding <= edge_padding:
+        return None
+
     for _ in range(max_tries):
         # angle = random.choice([0, 90, 180, 270])
         angle = 0
 
-        tx = np.random.randint(padding, canvas.w - padding)
-        ty = np.random.randint(padding, canvas.h - padding)
+        tx = np.random.randint(edge_padding, canvas.w - edge_padding)
+        ty = np.random.randint(edge_padding, canvas.h - edge_padding)
 
         mask_world, M = transform_mask(
             pad_asset.mask,
@@ -119,10 +227,17 @@ def place_pad_random(
         elif mask_world.ndim != 2:
             raise ValueError(f"Unsupported mask dimensionality: {mask_world.ndim}D (shape: {mask_world.shape})")
 
-        if check_collision(canvas.occupied_mask, mask_world):
+        mask_world_u8 = (mask_world > 0).astype(np.uint8)
+        if not _fits_inside_edge_padding(mask_world_u8, (canvas.h, canvas.w), edge_padding):
             continue
 
-        bbox = _bbox_from_mask(mask_world)
+        if check_collision(canvas.occupied_mask, mask_world_u8):
+            continue
+
+        if not _can_place_without_pad_keepout_conflict(canvas, mask_world_u8):
+            continue
+
+        bbox = _bbox_from_mask(mask_world_u8)
         if bbox is None:
             continue
 
@@ -130,7 +245,10 @@ def place_pad_random(
             too_close = False
 
             for inst in canvas.pad_instances:
-                other_bbox = _bbox_from_mask(inst.mask_world)
+                other_bbox = inst.bbox_world
+                if other_bbox is None:
+                    other_bbox = _bbox_from_mask((inst.mask_world > 0).astype(np.uint8))
+                    inst.bbox_world = other_bbox
                 if other_bbox is None:
                     continue
 
@@ -143,13 +261,16 @@ def place_pad_random(
                 continue
 
         # --- 7. Размещение ---
-        canvas.occupied_mask |= (mask_world > 0).astype(np.uint8)
+        canvas.occupied_mask |= mask_world_u8
+        _update_pad_keepout(canvas, mask_world_u8)
 
         inst = PadInstance(
             pad_asset,
             Transform(angle, tx, ty),
-            mask_world
+            mask_world_u8,
+            bbox_world=bbox
         )
+        inst._mask_world_u8 = mask_world_u8
 
         canvas.pad_instances.append(inst)
 
@@ -167,7 +288,8 @@ def place_pad_attached_to_open_end(
     next_pad_id: int,
     angles=(0, 90, 180, 270),
     max_attempts: int = 20,
-    require_touch: bool = True
+    require_touch: bool = True,
+    edge_padding: int = 0,
 ):
     """
     Пытается разместить pad так, чтобы он приклеился к open_end (концу существующего трейса).
@@ -178,6 +300,7 @@ def place_pad_attached_to_open_end(
     if open_end.trace_id not in traces_by_id:
         return None, next_pad_id
     tr = traces_by_id[open_end.trace_id]
+    tr_mask_world_u8 = (tr.mask_world > 0).astype(np.uint8)
 
     # Если этот конец уже закрыт — ничего не делаем
     if tr.pad_end[open_end.end_idx] is not None:
@@ -217,21 +340,37 @@ def place_pad_attached_to_open_end(
         if M is None or pad_mask_world is None:
             continue
 
-        pad_mask_world = (pad_mask_world > 0).astype(np.uint8)  # 0/1
+        pad_mask_world_u8 = (pad_mask_world > 0).astype(np.uint8)  # 0/1
 
-        if np.sum(pad_mask_world) == 0:
+        if cv2.countNonZero(pad_mask_world_u8) == 0:
+            continue
+
+        if not _fits_inside_edge_padding(pad_mask_world_u8, canvas_shape, edge_padding):
             continue
 
         # 1) Требуем контакт с трейсом (иначе можно “приклеить” рядом)
         if require_touch:
-            if not np.any((pad_mask_world > 0) & (tr.mask_world > 0)):
+            if cv2.countNonZero(cv2.bitwise_and(pad_mask_world_u8, tr_mask_world_u8)) == 0:
                 continue
+        
+        source_pad_mask = tr_mask_world_u8
+        source_pad_id = tr.pad_end[1 - open_end.end_idx]
+        source_pad = _find_pad_instance_by_id(canvas_state, source_pad_id)
+        if source_pad is not None:
+            source_pad_mask = cv2.bitwise_or(source_pad_mask, (source_pad.mask_world > 0).astype(np.uint8))
+            
+        if not _can_place_without_pad_keepout_conflict(
+            canvas_state,
+            pad_mask_world_u8,
+            allowed_overlap_mask=source_pad_mask
+        ):
+            continue
 
         # 2) Коллизии: запрещаем пересечение со всем, кроме этого trace
         # Разрешаем overlap с trace (tr.mask_world), но не с остальным occupied
-        overlap = (pad_mask_world > 0) & (canvas_state.occupied_mask > 0)
-        illegal_overlap = overlap & ~(tr.mask_world > 0)
-        if np.any(illegal_overlap):
+        overlap = cv2.bitwise_and(pad_mask_world_u8, canvas_state.occupied_mask)
+        illegal_overlap = cv2.bitwise_and(overlap, cv2.bitwise_not(tr_mask_world_u8))
+        if cv2.countNonZero(illegal_overlap) > 0:
             continue
 
         # 3) Явно запретим пересечение с другими трассами (кроме tr) — надёжно
@@ -239,7 +378,7 @@ def place_pad_attached_to_open_end(
         for other in canvas_state.trace_instances:
             if other.id == tr.id:
                 continue
-            if np.any((pad_mask_world > 0) & (other.mask_world > 0)):
+            if cv2.countNonZero(cv2.bitwise_and(pad_mask_world_u8, other.mask_world)) > 0:
                 bad = True
                 break
         if bad:
@@ -249,12 +388,18 @@ def place_pad_attached_to_open_end(
         # здесь всегда будет 1, но если ты потом захочешь “приклеивать к существующему паду” — пригодится.
 
         # SUCCESS -> создаём pad instance
+        pad_bbox = _bbox_from_mask(pad_mask_world_u8)
+        if pad_bbox is None:
+            continue
+
         pad_inst = PadInstance(
             asset=pad_asset,
             transform=Transform(angle, attach_x, attach_y),
-            mask_world=pad_mask_world,
-            id=next_pad_id
+            mask_world=pad_mask_world_u8,
+            id=next_pad_id,
+            bbox_world=pad_bbox
         )
+        pad_inst._mask_world_u8 = pad_mask_world_u8
         pad_inst.attached_traces = set([tr.id])
 
         # обновляем trace
@@ -262,7 +407,9 @@ def place_pad_attached_to_open_end(
 
         # коммит в canvas
         canvas_state.pad_instances.append(pad_inst)
-        canvas_state.occupied_mask |= pad_mask_world
+        canvas_state.register_pad(pad_inst)
+        canvas_state.occupied_mask |= pad_mask_world_u8
+        _update_pad_keepout(canvas_state, pad_mask_world_u8)
 
         # закрываем open end
         try:
@@ -325,22 +472,17 @@ def count_pad_connections(pad_instance, trace_instances, radius=5):
     return cnt
 
 def _pick_pad_attach_point(pad: PadInstance, boundary_mix: float = 0.65):
-    ys, xs = np.where(pad.mask_world > 0)
-    if len(xs) == 0:
+    _ensure_pad_attach_cache(pad)
+    if pad._attach_center is None:
         return None
 
-    cx = float(xs.mean())
-    cy = float(ys.mean())
+    cx, cy = pad._attach_center
 
     boundary_mix = float(np.clip(boundary_mix, 0.0, 1.0))
     if boundary_mix <= 0.0:
         return cx, cy
 
-    mask_u8 = (pad.mask_world > 0).astype(np.uint8)
-    eroded = cv2.erode(mask_u8, np.ones((3, 3), np.uint8), iterations=1)
-    boundary = mask_u8 & (~eroded)
-
-    by, bx = np.where(boundary > 0)
+    bx, by = pad._attach_boundary
     if len(bx) == 0:
         return cx, cy
 
@@ -406,7 +548,8 @@ def place_trace_attached_to_specific_pad(
     angles=(0, 90, 180, 270),
     max_attempts: int = 20,
     require_touch: bool = True,
-    pad_boundary_mix: float = 0.65
+    pad_boundary_mix: float = 0.65,
+    edge_padding: int = 0,
 ):
     """
     Пытается приклеить trace_asset к конкретному pad_instance.
@@ -417,9 +560,11 @@ def place_trace_attached_to_specific_pad(
         raise ValueError("pad.id must be set before attaching traces")
     
     canvas_shape = (canvas_state.h, canvas_state.w)
+    _ensure_pad_attach_cache(pad)
 
     # Базовая точка приклейки на паде: между центроидом и границей.
-    if np.count_nonzero(pad.mask_world) == 0:
+    pad_mask_world_u8 = pad._mask_world_u8
+    if pad_mask_world_u8 is None or cv2.countNonZero(pad_mask_world_u8) == 0:
         return None, None
 
     # Чтобы попытки были разнообразнее:
@@ -447,7 +592,13 @@ def place_trace_attached_to_specific_pad(
         mask_world = warp_mask_with_M(trace_asset.mask, M, canvas_shape)
 
         # быстрый отсев: пустая маска (вылетела за канвас)
-        if mask_world is None or np.sum(mask_world) == 0:
+        if mask_world is None:
+            continue
+        mask_world_u8 = (mask_world > 0).astype(np.uint8)
+        if cv2.countNonZero(mask_world_u8) == 0:
+            continue
+
+        if not _fits_inside_edge_padding(mask_world_u8, canvas_shape, edge_padding):
             continue
 
         # endpoints world
@@ -455,19 +606,19 @@ def place_trace_attached_to_specific_pad(
 
         # 1) Требуем реальный контакт с pad (защита от “почти приклеили”)
         if require_touch:
-            if not np.any((mask_world > 0) & (pad.mask_world > 0)):
+            if cv2.countNonZero(cv2.bitwise_and(mask_world_u8, pad_mask_world_u8)) == 0:
                 continue
 
         # 2) Разрешаем overlap только с target pad
-        overlap = (mask_world > 0) & (canvas_state.occupied_mask > 0)
-        illegal_overlap = overlap & ~(pad.mask_world > 0)
-        if np.any(illegal_overlap):
+        overlap = cv2.bitwise_and(mask_world_u8, canvas_state.occupied_mask)
+        illegal_overlap = cv2.bitwise_and(overlap, cv2.bitwise_not(pad_mask_world_u8))
+        if cv2.countNonZero(illegal_overlap) > 0:
             continue
 
         # 3) Трейсы не должны пересекаться друг с другом (явная проверка)
         intersects_trace = False
         for tr in canvas_state.trace_instances:
-            if np.any((mask_world > 0) & (tr.mask_world > 0)):
+            if cv2.countNonZero(cv2.bitwise_and(mask_world_u8, tr.mask_world)) > 0:
                 intersects_trace = True
                 break
         if intersects_trace:
@@ -480,7 +631,7 @@ def place_trace_attached_to_specific_pad(
         inst = TraceInstance(
             asset=trace_asset,
             transform=Transform(angle, float(tx_world), float(ty_world)),
-            mask_world=mask_world.astype(np.uint8),
+            mask_world=mask_world_u8,
             endpoints_world=endpoints_world
         )
         
@@ -497,7 +648,7 @@ def place_trace_attached_to_specific_pad(
         open_ends.append(OpenEnd(trace_id=inst.id, end_idx=free_idx, pos_xy=free_pos))
 
         canvas_state.trace_instances.append(inst)
-        canvas_state.occupied_mask |= (mask_world > 0).astype(np.uint8) if canvas_state.occupied_mask.max() > 1 else (mask_world > 0).astype(np.uint8)
+        canvas_state.occupied_mask |= mask_world_u8
 
         return inst, ep_idx
 
@@ -510,6 +661,7 @@ def place_trace_attached_to_pad(
     angles=(0, 90, 180, 270),
     max_attempts_pad_pick: int = 20,
     max_attempts_attach: int = 20,
+    edge_padding: int = 0,
 ):
     """
     Старая семантика: сам выбирает валидный pad и пытается к нему приклеить trace.
@@ -523,7 +675,8 @@ def place_trace_attached_to_pad(
             trace_asset,
             pad,
             angles=angles,
-            max_attempts=max_attempts_attach
+            max_attempts=max_attempts_attach,
+            edge_padding=edge_padding,
         )
         if inst is not None:
             return inst, ep_idx
@@ -694,4 +847,3 @@ def visualize_canvas_real(canvas: CanvasState, out_path="canvas_render.png"):
     cv2.imwrite(out_path, canvas_img)
 
     
-

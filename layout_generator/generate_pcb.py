@@ -2,6 +2,8 @@ import os
 import cv2
 import shutil
 import numpy as np
+import time
+from tqdm import tqdm
 
 from classes import *
 from placement_engine import *
@@ -183,36 +185,33 @@ def main():
 
     assert len(trace_assets) > 0, "No trace assets loaded"
     
-    canvas = CanvasState(1000, 1000)
+    for i in tqdm(range(20)):
     
-    # ok = generate_layout_by_coverage(
-    #     canvas=canvas,
-    #     pad_assets=pad_assets,
-    #     trace_assets=trace_assets,
-    #     target_coverage=0.14,   # например 10%
-    #     padding=30
-    # )
-    
-    path_plan = {
-        3: 3,
-        2: 4,
-        1: 6
-    }
+        canvas = CanvasState(1000, 1000, pad_keepout_radius=15)
+        
+        path_plan = {
+            3: random.randint(1, 3),
+            2: random.randint(2, 5),
+            1: random.randint(2, 7)
+        }
 
-    ok = generate_layout_by_path_plan(
-        canvas=canvas,
-        pad_assets=pad_assets,
-        trace_assets=trace_assets,
-        path_length_counts=path_plan,
-        isolated_pads=10,
-        padding=30,
-        max_path_attempts=200,
-        trace_attach_attempts=40,
-        close_attempts_per_end=100,
-    )
+        start = time.time()
+        ok = generate_layout_by_path_plan(
+            canvas=canvas,
+            pad_assets=pad_assets,
+            trace_assets=trace_assets,
+            path_length_counts=path_plan,
+            isolated_pads=10,
+            padding=10,
+            max_path_attempts=50,
+            trace_attach_attempts=20,
+            close_attempts_per_end=50,
+        )
+        end = time.time()
 
-    visualize_canvas_real(canvas, "canvas.png")
-    print("ok:", ok, "coverage:", canvas_coverage(canvas))
+        print(f"Time elapsed: {end - start}")
+        visualize_canvas_real(canvas, f"layouts/layout_{i}.png")
+        print("ok:", ok, "coverage:", canvas_coverage(canvas))
             
 if __name__ == "__main__":
     main()

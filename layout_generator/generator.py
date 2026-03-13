@@ -1,3 +1,4 @@
+import cv2
 import random
 import numpy as np
 
@@ -44,6 +45,7 @@ def generate_layout_by_coverage(
     p0.id = next_pad_id
     next_pad_id += 1
     p0.attached_traces = set()
+    canvas.register_pad(p0)
 
     # ---------- seed: one trace from p0 ----------
     t0, attached_ep = place_trace_attached_to_specific_pad(
@@ -52,7 +54,8 @@ def generate_layout_by_coverage(
         pad=p0,
         open_ends=open_ends,
         next_trace_id=next_trace_id,
-        require_touch=True
+        require_touch=True,
+        edge_padding=padding,
     )
     if t0 is not None:
         traces_by_id[t0.id] = t0
@@ -70,6 +73,7 @@ def generate_layout_by_coverage(
                 p.id = next_pad_id
                 next_pad_id += 1
                 p.attached_traces = set()
+                canvas.register_pad(p)
             continue
 
         # 2) если есть открытые концы — чаще закрываем их падом
@@ -92,7 +96,8 @@ def generate_layout_by_coverage(
                 next_pad_id=next_pad_id,
                 angles=(0, 90, 180, 270),
                 max_attempts=20,
-                require_touch=True
+                require_touch=True,
+                edge_padding=padding,
             )
             if p_new is not None:
                 next_pad_id = next_pad_id2
@@ -111,7 +116,8 @@ def generate_layout_by_coverage(
             pad=pad,
             open_ends=open_ends,
             next_trace_id=next_trace_id,
-            require_touch=True
+            require_touch=True,
+            edge_padding=padding,
         )
         if t is not None:
             traces_by_id[t.id] = t
@@ -138,7 +144,8 @@ def generate_layout_by_coverage(
                 next_pad_id=next_pad_id,
                 angles=(0, 90, 180, 270),
                 max_attempts=20,
-                require_touch=True
+                require_touch=True,
+                edge_padding=padding,
             )
             if p_new is not None:
                 next_pad_id = next_pad_id2
@@ -156,24 +163,43 @@ def generate_layout_by_coverage(
 
 def _rebuild_occupied_mask(canvas: CanvasState):
     canvas.occupied_mask[:] = 0
+    if hasattr(canvas, "pad_keepout_mask"):
+        canvas.pad_keepout_mask[:] = 0
+    
     for tr in canvas.trace_instances:
         canvas.occupied_mask |= (tr.mask_world > 0).astype(np.uint8)
+        
+    pad_keepout_radius = int(getattr(canvas, "pad_keepout_radius", 0))
+    keepout_kernel = None
+    if pad_keepout_radius > 0:
+        k = 2 * pad_keepout_radius + 1
+        keepout_kernel = np.ones((k, k), dtype=np.uint8)
+    
     for pad in canvas.pad_instances:
-        canvas.occupied_mask |= (pad.mask_world > 0).astype(np.uint8)
+        pad_binary = (pad.mask_world > 0).astype(np.uint8)
+        canvas.occupied_mask |= pad_binary
+        if keepout_kernel is not None:
+            canvas.pad_keepout_mask |= cv2.dilate(pad_binary, keepout_kernel, iterations=1)
+    if hasattr(canvas, "rebuild_pad_index"):
+        canvas.rebuild_pad_index()
 
 
 def _snapshot_canvas(canvas: CanvasState):
     return {
         "occupied_mask": canvas.occupied_mask.copy(),
+        "pad_keepout_mask": canvas.pad_keepout_mask.copy(),
         "pad_instances": list(canvas.pad_instances),
         "trace_instances": list(canvas.trace_instances),
+        "pad_by_id": dict(getattr(canvas, "pad_by_id", {})),
     }
 
 
 def _restore_canvas(canvas: CanvasState, snapshot):
     canvas.occupied_mask = snapshot["occupied_mask"]
+    canvas.pad_keepout_mask = snapshot["pad_keepout_mask"]
     canvas.pad_instances = snapshot["pad_instances"]
     canvas.trace_instances = snapshot["trace_instances"]
+    canvas.pad_by_id = snapshot.get("pad_by_id", {})
 
 
 def _try_place_single_path(
@@ -202,6 +228,7 @@ def _try_place_single_path(
     start_pad.id = next_pad_id
     start_pad.attached_traces = set()
     next_pad_id += 1
+    canvas.register_pad(start_pad)
 
     local_pads: dict[int, PadInstance] = {start_pad.id: start_pad}
     end_pad_ids: set[int] = {start_pad.id}
@@ -238,6 +265,7 @@ def _try_place_single_path(
                 next_trace_id=next_trace_id,
                 require_touch=True,
                 pad_boundary_mix=0.65,
+                edge_padding=padding,
             )
             if t is None:
                 _restore_canvas(canvas, segment_snapshot)
@@ -276,6 +304,7 @@ def _try_place_single_path(
                     angles=(0, 90, 180, 270),
                     max_attempts=20,
                     require_touch=True,
+                    edge_padding=padding,
                 )
                 if p_inst is not None:
                     new_pad = p_inst
@@ -393,6 +422,7 @@ def generate_layout_by_path_plan(
         p.id = next_pad_id
         p.attached_traces = set()
         next_pad_id += 1
+        canvas.register_pad(p)
         global_debug["isolated_pads_placed"] += 1
 
     _rebuild_occupied_mask(canvas)
