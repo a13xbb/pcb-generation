@@ -26,7 +26,7 @@ pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
     torch_dtype=torch.float16
 ).to(device)
 
-lora_dir = "/mnt/ssdm2/users/alexblokh/pcb_generation/pcb_lora"
+lora_dir = "/mnt/ssdm2/users/alexblokh/pcb_generation/pcb-generation/pcb_lora"
 lora_scale = 0.8
 
 pipe.unet = PeftModel.from_pretrained(
@@ -49,8 +49,8 @@ high resolution macro photography,
 industrial PCB manufacturing
 """
 
-edge_dir = Path("edges")
-out_dir = Path("generated")
+edge_dir = Path("/mnt/ssdm2/users/alexblokh/pcb_generation/pcb-generation/images/edges")
+out_dir = Path("/mnt/ssdm2/users/alexblokh/pcb_generation/pcb-generation/images/generated2")
 out_dir.mkdir(exist_ok=True)
 
 for p in edge_dir.glob("*.png"):
