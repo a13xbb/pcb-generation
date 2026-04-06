@@ -1,3 +1,6 @@
+import os
+os.environ['HF_HOME'] = '/mnt/ssdm2/users/alexblokh/cache'
+
 from __future__ import annotations
 
 import argparse
