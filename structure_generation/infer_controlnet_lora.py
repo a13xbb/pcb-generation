@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
-os.environ['HF_HOME'] = '/mnt/ssdm2/users/alexblokh/cache'
+import env
+os.environ['HF_HOME'] = env.HF_HOME
 
 import argparse
 from pathlib import Path
@@ -53,7 +54,8 @@ def main() -> None:
         args.pretrained_model_name_or_path,
         controlnet=controlnet,
         torch_dtype=weight_dtype,
-    ).to(device)
+        low_cpu_mem_usage=True
+    )
 
     pipe.unet = PeftModel.from_pretrained(pipe.unet, args.lora_path)
     for module in pipe.unet.modules():
@@ -61,6 +63,10 @@ def main() -> None:
             for key in module.scaling:
                 module.scaling[key] = args.lora_scale
     pipe.unet.eval()
+    
+    pipe.enable_model_cpu_offload()
+    pipe.enable_vae_slicing()
+    pipe.enable_attention_slicing()
 
     structure = cv2.imread(args.structure_map, cv2.IMREAD_GRAYSCALE)
     if structure is None:
