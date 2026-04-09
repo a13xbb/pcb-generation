@@ -4,3 +4,4 @@ images
 models
 runs
 venv
+structure_generation/train_structure_lora.py

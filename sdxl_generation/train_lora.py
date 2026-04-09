@@ -1,5 +1,6 @@
 import os
-os.environ['HF_HOME'] = '/mnt/ssdm2/users/alexblokh/cache'
+import env
+os.environ['HF_HOME'] = env.HF_HOME
 import argparse
 import random
 from pathlib import Path
