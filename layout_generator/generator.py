@@ -1,10 +1,12 @@
 import cv2
 import random
+import bisect
 import numpy as np
 
 from utils import *
 from classes import *
 from placement_engine import *
+from motifs import plan_grid, generate_abstract_motif_for_cell
 
 def is_on_border(pt, h, w, margin=1):
     x, y = pt
@@ -429,3 +431,201 @@ def generate_layout_by_path_plan(
     if debug_log:
         print("[path-plan][debug]", global_debug)
     return total_placed_paths > 0 or len(canvas.pad_instances) > 0
+
+
+# ---------------------------------------------------------------------------
+# Motif-based generation
+# ---------------------------------------------------------------------------
+
+def build_trace_catalog(trace_assets: list) -> dict:
+    """
+    Build a catalog of trace assets grouped by orientation.
+    Orientation is determined by the dx/dy of the asset's two skeleton endpoints.
+    Returns dict with keys:
+        'sorted_by_length': [(length, asset), ...]  – all traces, ascending
+        'by_orientation':   {'H': ..., 'V': ..., 'D': ...}
+        'lengths_H':        [float, ...]   – H lengths, sorted ascending
+        'lengths_V':        [float, ...]   – V lengths, sorted ascending
+    """
+    h_traces: list = []
+    v_traces: list = []
+    d_traces: list = []
+
+    for a in trace_assets:
+        ep0, ep1 = a.endpoints
+        dx = abs(ep1[0] - ep0[0])
+        dy = abs(ep1[1] - ep0[1])
+        if dy < 15:
+            h_traces.append((a.length, a))
+        elif dx < 15:
+            v_traces.append((a.length, a))
+        else:
+            d_traces.append((a.length, a))
+
+    for lst in (h_traces, v_traces, d_traces):
+        lst.sort(key=lambda x: x[0])
+
+    all_sorted = sorted(
+        h_traces + v_traces + d_traces, key=lambda x: x[0]
+    )
+
+    return {
+        "sorted_by_length": all_sorted,
+        "by_orientation": {"H": h_traces, "V": v_traces, "D": d_traces},
+        "lengths_H": [x[0] for x in h_traces],
+        "lengths_V": [x[0] for x in v_traces],
+    }
+
+
+def find_best_trace(catalog: dict, required_length: float,
+                    required_angle: int, tolerance: float = 15.0):
+    """
+    Return a random TraceAsset whose length is within `tolerance` of
+    `required_length` and whose natural orientation matches `required_angle`.
+    required_angle: 0 or 180 → H preferred; 90 or 270 → V preferred (H as fallback).
+    Returns None if nothing matches.
+    """
+    if required_angle in (0, 180):
+        primary = catalog["by_orientation"]["H"]
+        fallback = catalog["sorted_by_length"]
+    else:
+        primary = catalog["by_orientation"]["V"]
+        if not primary:
+            primary = catalog["by_orientation"]["H"]
+        fallback = catalog["sorted_by_length"]
+
+    for pool in (primary, fallback):
+        matching = [a for l, a in pool if abs(l - required_length) <= tolerance]
+        if matching:
+            return random.choice(matching)
+    return None
+
+
+def place_motif(canvas: CanvasState, motif, pad_assets: list, trace_catalog: dict,
+                next_pad_id: int, next_trace_id: int, edge_padding: int = 10):
+    """
+    Instantiate an AbstractMotif onto the canvas.
+    All pads must place successfully (hard requirement).
+    Trace placements are best-effort: failure skips that trace but keeps the pads.
+    Returns (success, new_next_pad_id, new_next_trace_id).
+    """
+    placed_pads: dict = {}
+
+    for abs_pad in motif.pads:
+        pad_asset = random.choice(pad_assets)
+        x, y = abs_pad.pos
+        inst = place_pad_at_position(canvas, pad_asset, x, y, abs_pad.angle, edge_padding)
+        if inst is None:
+            return False, next_pad_id, next_trace_id
+        inst.id = next_pad_id
+        inst.attached_traces = set()
+        canvas.register_pad(inst)
+        next_pad_id += 1
+        placed_pads[abs_pad.pad_id] = inst
+
+    for abs_trace in motif.traces:
+        pad_a = placed_pads[abs_trace.pad_id_a]
+        pad_b = placed_pads[abs_trace.pad_id_b]
+
+        tried_ids: set = set()
+        for _ in range(4):
+            ta = find_best_trace(trace_catalog, abs_trace.required_length,
+                                 abs_trace.required_angle, tolerance=15.0)
+            if ta is None:
+                ta = find_best_trace(trace_catalog, abs_trace.required_length,
+                                     abs_trace.required_angle, tolerance=30.0)
+            if ta is None:
+                break
+            if id(ta) in tried_ids:
+                # try a different asset from the same length bin
+                ta2 = find_best_trace(trace_catalog, abs_trace.required_length,
+                                      abs_trace.required_angle, tolerance=30.0)
+                if ta2 is None or id(ta2) in tried_ids:
+                    break
+                ta = ta2
+            tried_ids.add(id(ta))
+
+            inst = place_trace_connecting_pads(
+                canvas, ta, pad_a, pad_b,
+                abs_trace.required_angle, next_trace_id, edge_padding,
+            )
+            if inst is not None:
+                next_trace_id += 1
+                break
+
+    return True, next_pad_id, next_trace_id
+
+
+def generate_layout_motif_based(
+    canvas: CanvasState,
+    pad_assets: list,
+    trace_assets: list,
+    n_cols: int = 3,
+    n_rows: int = 2,
+    edge_padding: int = 10,
+    max_motif_attempts: int = 5,
+    isolated_pads: int = 8,
+    debug_log: bool = False,
+) -> bool:
+    """
+    Generate a PCB-like layout using motif-based generation.
+
+    The canvas is divided into a n_cols × n_rows grid.  Each cell is assigned
+    a structural motif (PAD_ROW, DUAL_ROW, PAD_PAIR, or TRACE_BUS) drawn from
+    available trace assets so that the abstract topology can always be
+    instantiated with real assets.
+    """
+    catalog = build_trace_catalog(trace_assets)
+    available_h = catalog["lengths_H"]
+    available_v = catalog["lengths_V"]
+
+    cells = plan_grid(canvas.h, canvas.w, n_cols, n_rows)
+    random.shuffle(cells)
+
+    next_pad_id = 0
+    next_trace_id = 0
+    placed_motifs = 0
+
+    for cell in cells:
+        for attempt in range(max_motif_attempts):
+            snap = _snapshot_canvas(canvas)
+            prev_pad_id = next_pad_id
+            prev_trace_id = next_trace_id
+
+            motif = generate_abstract_motif_for_cell(cell, available_h, available_v)
+            if motif is None:
+                break
+
+            ok, next_pad_id, next_trace_id = place_motif(
+                canvas, motif, pad_assets, catalog,
+                next_pad_id, next_trace_id, edge_padding,
+            )
+
+            if ok:
+                placed_motifs += 1
+                break
+
+            _restore_canvas(canvas, snap)
+            next_pad_id = prev_pad_id
+            next_trace_id = prev_trace_id
+
+    for _ in range(max(0, isolated_pads)):
+        p = place_pad_random(canvas, random.choice(pad_assets), padding=edge_padding)
+        if p is None:
+            continue
+        p.id = next_pad_id
+        p.attached_traces = set()
+        next_pad_id += 1
+        canvas.register_pad(p)
+
+    _rebuild_occupied_mask(canvas)
+
+    if debug_log:
+        print(
+            f"[motif] placed_motifs={placed_motifs}  "
+            f"pads={len(canvas.pad_instances)}  "
+            f"traces={len(canvas.trace_instances)}  "
+            f"coverage={canvas_coverage(canvas):.3f}"
+        )
+
+    return placed_motifs > 0 or len(canvas.pad_instances) > 0

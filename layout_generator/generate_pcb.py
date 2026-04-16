@@ -8,7 +8,8 @@ from tqdm import tqdm
 from classes import *
 from placement_engine import *
 from utils import * 
-from generator import generate_layout_by_coverage, generate_layout_by_path_plan, canvas_coverage
+from generator import (generate_layout_by_coverage, generate_layout_by_path_plan,
+                        generate_layout_motif_based, canvas_coverage)
 from pad_classifier import classify_pad_shape
 
 def main():
@@ -128,11 +129,22 @@ def main():
     
     
     
-    orig_img = cv2.imread("images/example.jpg")
-    assert orig_img is not None, "Failed to read images/example.jpg"
+    _dir = os.path.dirname(os.path.abspath(__file__))
+    assets_root = os.path.join(_dir, '..', 'assets')
+    images_root = os.path.join(_dir, '..', 'images')
+
+    def _load_object_img(folder: str, mask_name: str, fallback_shape):
+        """Load the matching object_XXXX.png crop, or synthesise a grey placeholder."""
+        obj_name = mask_name.replace("mask", "object", 1)
+        obj_path = os.path.join(folder, obj_name)
+        img = cv2.imread(obj_path)
+        if img is not None:
+            return img
+        h, w = fallback_shape
+        return np.full((h, w, 3), 160, dtype=np.uint8)
 
     # ---------- Load PAD assets ----------
-    pads_folder = "PADS"
+    pads_folder = os.path.join(assets_root, 'PADS')
     pad_assets: list[PadAsset] = []
 
     pad_mask_files = [
@@ -145,15 +157,16 @@ def main():
         if pad_mask is None:
             continue
 
-        pad_mask = (pad_mask > 0).astype(np.uint8)  # 0/1
+        pad_mask = (pad_mask > 0).astype(np.uint8)
+        obj_img = _load_object_img(pads_folder, name, pad_mask.shape[:2])
 
         bbox, centroid = compute_bbox_and_centroid(pad_mask)
-        pad_assets.append(PadAsset(pad_mask, orig_img, centroid, bbox))
+        pad_assets.append(PadAsset(pad_mask, obj_img, centroid, bbox))
 
     assert len(pad_assets) > 0, "No pad assets loaded"
 
     # ---------- Load TRACE assets ----------
-    traces_folder = "COPPER_TRACES"
+    traces_folder = os.path.join(assets_root, 'COPPER_TRACES')
     trace_assets: list[TraceAsset] = []
 
     trace_mask_files = sorted([
@@ -166,9 +179,9 @@ def main():
         if trace_mask is None:
             continue
 
-        trace_mask = (trace_mask > 0).astype(np.uint8)  # 0/1
+        trace_mask = (trace_mask > 0).astype(np.uint8)
 
-        skel = skeletonize(trace_mask)                  # ожидаем 0/1 или 0/255 — не критично, но лучше 0/1
+        skel = skeletonize(trace_mask)
         skel = (skel > 0).astype(np.uint8)
 
         endpoints = find_endpoints(trace_mask, skel)
@@ -180,38 +193,34 @@ def main():
             length = 0.0
 
         bbox, centroid = compute_bbox_and_centroid(trace_mask)
-
-        trace_assets.append(TraceAsset(trace_mask, orig_img, skel, endpoints, centroid, length))
+        obj_img = _load_object_img(traces_folder, name, trace_mask.shape[:2])
+        trace_assets.append(TraceAsset(trace_mask, obj_img, skel, endpoints, centroid, length))
 
     assert len(trace_assets) > 0, "No trace assets loaded"
-    
+    print(f"Loaded {len(pad_assets)} pad assets, {len(trace_assets)} trace assets")
+
+    out_dir = os.path.join(images_root, 'layouts')
+    os.makedirs(out_dir, exist_ok=True)
+
     for i in tqdm(range(20)):
-    
-        canvas = CanvasState(1000, 1000, pad_keepout_radius=15)
-        
-        path_plan = {
-            3: random.randint(1, 3),
-            2: random.randint(2, 5),
-            1: random.randint(2, 7)
-        }
+        canvas = CanvasState(1000, 1000, pad_keepout_radius=8)
 
         start = time.time()
-        ok = generate_layout_by_path_plan(
+        ok = generate_layout_motif_based(
             canvas=canvas,
             pad_assets=pad_assets,
             trace_assets=trace_assets,
-            path_length_counts=path_plan,
-            isolated_pads=10,
-            padding=10,
-            max_path_attempts=50,
-            trace_attach_attempts=20,
-            close_attempts_per_end=50,
+            n_cols=3,
+            n_rows=2,
+            edge_padding=10,
+            max_motif_attempts=5,
+            isolated_pads=8,
+            debug_log=True,
         )
         end = time.time()
 
-        print(f"Time elapsed: {end - start}")
-        visualize_canvas_real(canvas, f"layouts/layout_{i}.png")
-        print("ok:", ok, "coverage:", canvas_coverage(canvas))
+        print(f"Time elapsed: {end - start:.1f}s  ok={ok}  coverage={canvas_coverage(canvas):.3f}")
+        visualize_canvas_real(canvas, os.path.join(out_dir, f'layout_{i}.png'))
             
 if __name__ == "__main__":
     main()
