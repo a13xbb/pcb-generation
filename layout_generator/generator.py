@@ -6,7 +6,7 @@ import numpy as np
 from utils import *
 from classes import *
 from placement_engine import *
-from motifs import plan_grid, generate_abstract_motif_for_cell
+from motifs import plan_grid, generate_abstract_motif_for_cell, MotifCell
 
 def is_on_border(pt, h, w, margin=1):
     x, y = pt
@@ -556,6 +556,188 @@ def place_motif(canvas: CanvasState, motif, pad_assets: list, trace_catalog: dic
     return True, next_pad_id, next_trace_id
 
 
+def _sample_pad_in_cell(
+    canvas: CanvasState,
+    cell: MotifCell,
+    pad_assets: list,
+    next_pad_id: int,
+    edge_padding: int,
+    max_tries: int = 30,
+) -> 'PadInstance | None':
+    """Place a pad with centroid sampled uniformly inside the given cell. Returns registered PadInstance or None."""
+    ox, oy = cell.origin
+    cw, ch = cell.size
+    lo_x = max(float(edge_padding), ox)
+    hi_x = min(float(canvas.w - edge_padding), ox + cw)
+    lo_y = max(float(edge_padding), oy)
+    hi_y = min(float(canvas.h - edge_padding), oy + ch)
+    if lo_x >= hi_x or lo_y >= hi_y:
+        return None
+    for _ in range(max_tries):
+        tx = random.uniform(lo_x, hi_x)
+        ty = random.uniform(lo_y, hi_y)
+        angle = random.choice([0, 90, 180, 270])
+        inst = place_pad_at_position(canvas, random.choice(pad_assets), tx, ty, angle, edge_padding)
+        if inst is not None:
+            inst.id = next_pad_id
+            inst.attached_traces = set()
+            canvas.register_pad(inst)
+            return inst
+    return None
+
+
+def _place_chain_in_cell(
+    canvas: CanvasState,
+    cell: MotifCell,
+    pad_assets: list,
+    trace_assets: list,
+    n_segments: int,
+    next_pad_id: int,
+    next_trace_id: int,
+    edge_padding: int = 10,
+    angles: tuple = (0, 90, 180, 270),
+    trace_attempts: int = 30,
+    close_attempts: int = 50,
+) -> tuple:
+    """
+    Grow-forward chain: start pad → (trace → pad) × n_segments.
+    Uses any trace shape (H, V, D, curvy) so all assets are exercised.
+    Success = True if start pad was placed; partial chains are fine visually.
+    Returns (success, next_pad_id, next_trace_id).
+    """
+    start_pad = _sample_pad_in_cell(canvas, cell, pad_assets, next_pad_id, edge_padding)
+    if start_pad is None:
+        return False, next_pad_id, next_trace_id
+    next_pad_id += 1
+
+    current_pad = start_pad
+    open_ends: list = []
+    traces_by_id: dict = {}
+
+    for _ in range(n_segments):
+        # Snapshot before the segment so we can roll back if pad-closing fails,
+        # preventing traces from being left without a pad on their free end.
+        seg_snap = _snapshot_canvas(canvas)
+        prev_trace_id_seg = next_trace_id
+        oe_len_before = len(open_ends)
+
+        ta = random.choice(trace_assets)
+        t, _ = place_trace_attached_to_specific_pad(
+            canvas_state=canvas,
+            trace_asset=ta,
+            pad=current_pad,
+            open_ends=open_ends,
+            next_trace_id=next_trace_id,
+            angles=angles,
+            max_attempts=trace_attempts,
+            require_touch=True,
+            edge_padding=edge_padding,
+        )
+        if t is None:
+            break
+        traces_by_id[t.id] = t
+        next_trace_id += 1
+
+        oe = next((e for e in open_ends if e.trace_id == t.id), None)
+        if oe is None:
+            _restore_canvas(canvas, seg_snap)
+            del traces_by_id[t.id]
+            open_ends[oe_len_before:] = []
+            next_trace_id = prev_trace_id_seg
+            break
+
+        new_pad = None
+        for _ in range(close_attempts):
+            p, next_pad_id2 = place_pad_attached_to_open_end(
+                canvas_state=canvas,
+                pad_asset=random.choice(pad_assets),
+                open_end=oe,
+                open_ends=open_ends,
+                traces_by_id=traces_by_id,
+                next_pad_id=next_pad_id,
+                angles=(0, 90, 180, 270),
+                max_attempts=20,
+                require_touch=True,
+                edge_padding=edge_padding,
+            )
+            if p is not None:
+                new_pad = p
+                next_pad_id = next_pad_id2
+                break
+
+        if new_pad is None:
+            # Roll back the trace — no orphan traces on canvas.
+            _restore_canvas(canvas, seg_snap)
+            del traces_by_id[t.id]
+            open_ends[oe_len_before:] = []
+            next_trace_id = prev_trace_id_seg
+            break
+        current_pad = new_pad
+
+    return True, next_pad_id, next_trace_id
+
+
+def _place_parallel_chains_in_cell(
+    canvas: CanvasState,
+    cell: MotifCell,
+    pad_assets: list,
+    trace_assets: list,
+    catalog: dict,
+    n_chains: int,
+    n_segments: int,
+    next_pad_id: int,
+    next_trace_id: int,
+    edge_padding: int = 10,
+) -> tuple:
+    """
+    Place n_chains H-biased parallel chains spaced exactly _CHAIN_SPACING px apart.
+    A random start y is chosen in the cell so all chains fit; each chain gets a
+    narrow (chain_spacing-tall) sub-cell so start pads are truly close together.
+    Per-chain failures roll back that chain only.
+    Returns (placed_any, next_pad_id, next_trace_id).
+    """
+    _CHAIN_SPACING = 45  # px between parallel chain start y-positions
+
+    h_traces = [a for _, a in catalog["by_orientation"]["H"]] or trace_assets
+
+    ox, oy = cell.origin
+    cw, ch = cell.size
+    total_span = (n_chains - 1) * _CHAIN_SPACING
+
+    lo_y = oy
+    hi_y = max(oy + 1.0, oy + ch - total_span)
+    first_y = random.uniform(lo_y, hi_y)
+
+    placed_any = False
+    for i in range(n_chains):
+        chain_y = first_y + i * _CHAIN_SPACING
+        sub_cell = MotifCell(
+            cell_x=cell.cell_x, cell_y=cell.cell_y,
+            origin=(ox, chain_y - _CHAIN_SPACING / 2.0),
+            size=(cw, float(_CHAIN_SPACING)),
+        )
+
+        snap = _snapshot_canvas(canvas)
+        prev_pad_id_i = next_pad_id
+        prev_trace_id_i = next_trace_id
+
+        ok, next_pad_id, next_trace_id = _place_chain_in_cell(
+            canvas, sub_cell, pad_assets, h_traces, n_segments,
+            next_pad_id, next_trace_id, edge_padding,
+            angles=(0, 180),
+            trace_attempts=20,
+            close_attempts=40,
+        )
+        if ok:
+            placed_any = True
+        else:
+            _restore_canvas(canvas, snap)
+            next_pad_id = prev_pad_id_i
+            next_trace_id = prev_trace_id_i
+
+    return placed_any, next_pad_id, next_trace_id
+
+
 def generate_layout_motif_based(
     canvas: CanvasState,
     pad_assets: list,
@@ -586,20 +768,43 @@ def generate_layout_motif_based(
     next_trace_id = 0
     placed_motifs = 0
 
+    _STRATEGIES = ['abstract', 'chain', 'parallel_chains']
+    _WEIGHTS    = [0.25,       0.25,   0.50]
+
     for cell in cells:
         for attempt in range(max_motif_attempts):
             snap = _snapshot_canvas(canvas)
             prev_pad_id = next_pad_id
             prev_trace_id = next_trace_id
 
-            motif = generate_abstract_motif_for_cell(cell, available_h, available_v)
-            if motif is None:
-                break
+            strategy = random.choices(_STRATEGIES, _WEIGHTS)[0]
 
-            ok, next_pad_id, next_trace_id = place_motif(
-                canvas, motif, pad_assets, catalog,
-                next_pad_id, next_trace_id, edge_padding,
-            )
+            if strategy == 'abstract':
+                motif = generate_abstract_motif_for_cell(cell, available_h, available_v)
+                if motif is None:
+                    _restore_canvas(canvas, snap)
+                    next_pad_id = prev_pad_id
+                    next_trace_id = prev_trace_id
+                    continue
+                ok, next_pad_id, next_trace_id = place_motif(
+                    canvas, motif, pad_assets, catalog,
+                    next_pad_id, next_trace_id, edge_padding,
+                )
+
+            elif strategy == 'chain':
+                n_seg = random.choice([2, 3, 4])
+                ok, next_pad_id, next_trace_id = _place_chain_in_cell(
+                    canvas, cell, pad_assets, trace_assets, n_seg,
+                    next_pad_id, next_trace_id, edge_padding,
+                )
+
+            else:  # parallel_chains
+                n_chains = random.choice([3, 4, 5])
+                n_seg = random.choice([2, 3])
+                ok, next_pad_id, next_trace_id = _place_parallel_chains_in_cell(
+                    canvas, cell, pad_assets, trace_assets, catalog,
+                    n_chains, n_seg, next_pad_id, next_trace_id, edge_padding,
+                )
 
             if ok:
                 placed_motifs += 1

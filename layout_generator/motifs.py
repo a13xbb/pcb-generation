@@ -5,10 +5,12 @@ import random
 
 
 class MotifType(Enum):
-    PAD_ROW   = "pad_row"
-    DUAL_ROW  = "dual_row"
-    PAD_PAIR  = "pad_pair"
-    TRACE_BUS = "trace_bus"
+    PAD_ROW        = "pad_row"
+    DUAL_ROW       = "dual_row"
+    PAD_PAIR       = "pad_pair"
+    TRACE_BUS      = "trace_bus"
+    TRACE_CHAIN    = "trace_chain"     # single grow-forward multi-segment path
+    PARALLEL_CHAINS = "parallel_chains"  # 2-3 side-by-side H-biased chains
 
 
 @dataclass
