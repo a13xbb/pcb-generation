@@ -609,6 +609,23 @@ def _pick_trace(trace_assets: list) -> 'TraceAsset':
     return ta
 
 
+def _trace_angles_for_pad(pad_instance) -> tuple:
+    """
+    Returns compatible trace attachment angles for this pad.
+    Oval pads restrict to horizontal (0,180) or vertical (90,270) based on
+    their current placed orientation. Square/circle pads allow all angles.
+    """
+    asset = pad_instance.asset
+    ratio = max(asset.w, asset.h) / max(1, min(asset.w, asset.h))
+    if ratio < 1.4:
+        return (0, 90, 180, 270)
+    placed_angle = int(pad_instance.transform.angle) % 360
+    natural_horizontal = asset.w >= asset.h
+    placed_horizontal = placed_angle in (0, 180)
+    currently_horizontal = (natural_horizontal == placed_horizontal)
+    return (0, 180) if currently_horizontal else (90, 270)
+
+
 def _pad_angles_for_direction(pad_asset, dx: float, dy: float) -> tuple:
     """
     For oval pads, return angles that orient the pad so its short side faces
@@ -667,6 +684,9 @@ def _place_chain_in_cell(
         prev_trace_id_seg = next_trace_id
         oe_len_before = len(open_ends)
 
+        effective_angles = _trace_angles_for_pad(current_pad)
+        if set(angles) != {0, 90, 180, 270}:
+            effective_angles = tuple(a for a in effective_angles if a in angles) or angles
         ta = _pick_trace(trace_assets)
         t, _ = place_trace_attached_to_specific_pad(
             canvas_state=canvas,
@@ -674,7 +694,7 @@ def _place_chain_in_cell(
             pad=current_pad,
             open_ends=open_ends,
             next_trace_id=next_trace_id,
-            angles=angles,
+            angles=effective_angles,
             max_attempts=trace_attempts,
             require_touch=True,
             edge_padding=edge_padding,
@@ -734,6 +754,9 @@ def _place_chain_in_cell(
         prev_t = next_trace_id
         oe_len_before = len(open_ends)
 
+        branch_angles = _trace_angles_for_pad(bpad)
+        if set(angles) != {0, 90, 180, 270}:
+            branch_angles = tuple(a for a in branch_angles if a in angles) or angles
         ta = _pick_trace(trace_assets)
         bt, _ = place_trace_attached_to_specific_pad(
             canvas_state=canvas,
@@ -741,7 +764,7 @@ def _place_chain_in_cell(
             pad=bpad,
             open_ends=open_ends,
             next_trace_id=next_trace_id,
-            angles=angles,
+            angles=branch_angles,
             max_attempts=trace_attempts,
             require_touch=True,
             edge_padding=edge_padding,

@@ -203,7 +203,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     for i in tqdm(range(20)):
-        canvas = CanvasState(1000, 1000, pad_keepout_radius=8)
+        canvas = CanvasState(600, 600, pad_keepout_radius=8)
 
         start = time.time()
         ok = generate_layout_motif_based(
