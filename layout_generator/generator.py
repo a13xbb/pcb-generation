@@ -556,6 +556,21 @@ def place_motif(canvas: CanvasState, motif, pad_assets: list, trace_catalog: dic
     return True, next_pad_id, next_trace_id
 
 
+def _scale_trace_asset(asset: 'TraceAsset', scale: float) -> 'TraceAsset':
+    """Return a resized copy of a TraceAsset. Scale < 1 shrinks, > 1 enlarges."""
+    if abs(scale - 1.0) < 0.02:
+        return asset
+    nw = max(2, int(round(asset.w * scale)))
+    nh = max(2, int(round(asset.h * scale)))
+    new_size = (nw, nh)
+    new_mask = (cv2.resize(asset.mask.astype(np.uint8), new_size, interpolation=cv2.INTER_NEAREST) > 0).astype(np.uint8)
+    new_img  = cv2.resize(asset.image, new_size, interpolation=cv2.INTER_AREA) if asset.image is not None else None
+    new_skel = (cv2.resize(asset.skeleton.astype(np.uint8), new_size, interpolation=cv2.INTER_NEAREST) > 0).astype(np.uint8)
+    new_eps  = [(int(round(x * scale)), int(round(y * scale))) for x, y in asset.endpoints]
+    new_cen  = (asset.centroid[0] * scale, asset.centroid[1] * scale)
+    return TraceAsset(new_mask, new_img, new_skel, new_eps, new_cen, asset.length * scale)
+
+
 def _sample_pad_in_cell(
     canvas: CanvasState,
     cell: MotifCell,
@@ -586,6 +601,34 @@ def _sample_pad_in_cell(
     return None
 
 
+def _pick_trace(trace_assets: list) -> 'TraceAsset':
+    """Pick a random trace asset, sometimes scaling it up (never down)."""
+    ta = random.choice(trace_assets)
+    if random.random() < 0.5:
+        ta = _scale_trace_asset(ta, random.uniform(1.0, 1.5))
+    return ta
+
+
+def _pad_angles_for_direction(pad_asset, dx: float, dy: float) -> tuple:
+    """
+    For oval pads, return angles that orient the pad so its short side faces
+    the incoming trace (long axis aligned with trace direction).
+    For square/circle pads, returns all four angles.
+    """
+    ratio = max(pad_asset.w, pad_asset.h) / max(1, min(pad_asset.w, pad_asset.h))
+    if ratio < 1.4:
+        return (0, 90, 180, 270)
+    # Natural orientation: wide (w > h) → horizontal oval; tall (h > w) → vertical oval.
+    natural_horizontal = pad_asset.w >= pad_asset.h
+    trace_horizontal = abs(dx) >= abs(dy)
+    if trace_horizontal:
+        # Want long axis horizontal → short sides face left/right (where trace connects).
+        return (0, 180) if natural_horizontal else (90, 270)
+    else:
+        # Want long axis vertical → short sides face top/bottom.
+        return (90, 270) if natural_horizontal else (0, 180)
+
+
 def _place_chain_in_cell(
     canvas: CanvasState,
     cell: MotifCell,
@@ -598,10 +641,12 @@ def _place_chain_in_cell(
     angles: tuple = (0, 90, 180, 270),
     trace_attempts: int = 30,
     close_attempts: int = 50,
+    branch_prob: float = 0.35,
 ) -> tuple:
     """
     Grow-forward chain: start pad → (trace → pad) × n_segments.
     Uses any trace shape (H, V, D, curvy) so all assets are exercised.
+    After the chain, attempts branches from intermediate (degree-2) pads.
     Success = True if start pad was placed; partial chains are fine visually.
     Returns (success, next_pad_id, next_trace_id).
     """
@@ -611,6 +656,7 @@ def _place_chain_in_cell(
     next_pad_id += 1
 
     current_pad = start_pad
+    chain_pads: list = [start_pad]
     open_ends: list = []
     traces_by_id: dict = {}
 
@@ -621,7 +667,7 @@ def _place_chain_in_cell(
         prev_trace_id_seg = next_trace_id
         oe_len_before = len(open_ends)
 
-        ta = random.choice(trace_assets)
+        ta = _pick_trace(trace_assets)
         t, _ = place_trace_attached_to_specific_pad(
             canvas_state=canvas,
             trace_asset=ta,
@@ -646,16 +692,21 @@ def _place_chain_in_cell(
             next_trace_id = prev_trace_id_seg
             break
 
+        other_ep = t.endpoints_world[1 - oe.end_idx]
+        tdx = oe.pos_xy[0] - other_ep[0]
+        tdy = oe.pos_xy[1] - other_ep[1]
+
         new_pad = None
         for _ in range(close_attempts):
+            p_asset = random.choice(pad_assets)
             p, next_pad_id2 = place_pad_attached_to_open_end(
                 canvas_state=canvas,
-                pad_asset=random.choice(pad_assets),
+                pad_asset=p_asset,
                 open_end=oe,
                 open_ends=open_ends,
                 traces_by_id=traces_by_id,
                 next_pad_id=next_pad_id,
-                angles=(0, 90, 180, 270),
+                angles=_pad_angles_for_direction(p_asset, tdx, tdy),
                 max_attempts=20,
                 require_touch=True,
                 edge_padding=edge_padding,
@@ -673,6 +724,71 @@ def _place_chain_in_cell(
             next_trace_id = prev_trace_id_seg
             break
         current_pad = new_pad
+        chain_pads.append(new_pad)
+
+    # Attempt one branch from each intermediate pad (degree-2 pads in the chain).
+    for bpad in chain_pads[1:-1]:
+        if random.random() > branch_prob:
+            continue
+        b_snap = _snapshot_canvas(canvas)
+        prev_t = next_trace_id
+        oe_len_before = len(open_ends)
+
+        ta = _pick_trace(trace_assets)
+        bt, _ = place_trace_attached_to_specific_pad(
+            canvas_state=canvas,
+            trace_asset=ta,
+            pad=bpad,
+            open_ends=open_ends,
+            next_trace_id=next_trace_id,
+            angles=angles,
+            max_attempts=trace_attempts,
+            require_touch=True,
+            edge_padding=edge_padding,
+        )
+        if bt is None:
+            _restore_canvas(canvas, b_snap)
+            open_ends[oe_len_before:] = []
+            continue
+
+        boe = next((e for e in open_ends if e.trace_id == bt.id), None)
+        if boe is None:
+            _restore_canvas(canvas, b_snap)
+            open_ends[oe_len_before:] = []
+            continue
+
+        traces_by_id[bt.id] = bt
+        next_trace_id += 1
+
+        b_other_ep = bt.endpoints_world[1 - boe.end_idx]
+        bdx = boe.pos_xy[0] - b_other_ep[0]
+        bdy = boe.pos_xy[1] - b_other_ep[1]
+
+        placed_bp = None
+        for _ in range(close_attempts):
+            p_asset = random.choice(pad_assets)
+            p, nid = place_pad_attached_to_open_end(
+                canvas_state=canvas,
+                pad_asset=p_asset,
+                open_end=boe,
+                open_ends=open_ends,
+                traces_by_id=traces_by_id,
+                next_pad_id=next_pad_id,
+                angles=_pad_angles_for_direction(p_asset, bdx, bdy),
+                max_attempts=20,
+                require_touch=True,
+                edge_padding=edge_padding,
+            )
+            if p is not None:
+                placed_bp = p
+                next_pad_id = nid
+                break
+
+        if placed_bp is None:
+            _restore_canvas(canvas, b_snap)
+            del traces_by_id[bt.id]
+            open_ends[oe_len_before:] = []
+            next_trace_id = prev_t
 
     return True, next_pad_id, next_trace_id
 
