@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
         default="stabilityai/stable-diffusion-xl-base-1.0",
         help="Base SDXL model id/path.",
     )
-    parser.add_argument("--resolution", type=int, default=768)
+    parser.add_argument("--resolution", type=int, default=600)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-5)
