@@ -210,11 +210,10 @@ def main():
             canvas=canvas,
             pad_assets=pad_assets,
             trace_assets=trace_assets,
-            n_cols=4,
-            n_rows=3,
+            n_cols=5,
+            n_rows=4,
             edge_padding=10,
-            max_motif_attempts=5,
-            isolated_pads=8,
+            max_motif_attempts=8,
             debug_log=True,
         )
         end = time.time()

@@ -813,7 +813,10 @@ def _place_chain_in_cell(
             open_ends[oe_len_before:] = []
             next_trace_id = prev_t
 
-    return True, next_pad_id, next_trace_id
+    # Success only if at least one trace was placed — otherwise caller rolls back
+    # (otherwise a lone start_pad would be left as an isolated pad).
+    success = len(traces_by_id) > 0
+    return success, next_pad_id, next_trace_id
 
 
 def _place_parallel_chains_in_cell(
@@ -877,6 +880,66 @@ def _place_parallel_chains_in_cell(
     return placed_any, next_pad_id, next_trace_id
 
 
+def _try_place_isolated_line(
+    canvas: CanvasState,
+    pad_asset,
+    count: int,
+    angle: int,
+    horizontal: bool,
+    spacing: int,
+    edge_padding: int,
+    next_pad_id: int,
+    max_anchor_attempts: int = 30,
+):
+    """
+    Try to place a line of `count` same-asset pads. All-or-nothing per anchor:
+    snapshot canvas, try placing all pads along the line; if any collides,
+    restore and try a different anchor. Returns (placed_pads_list, next_pad_id).
+    """
+    pad_w = pad_asset.w if horizontal else pad_asset.h
+    line_length = (count - 1) * spacing + max(pad_asset.w, pad_asset.h)
+    if horizontal:
+        max_x = canvas.w - edge_padding - line_length
+        max_y = canvas.h - edge_padding - pad_asset.h
+    else:
+        max_x = canvas.w - edge_padding - pad_asset.w
+        max_y = canvas.h - edge_padding - line_length
+
+    if max_x < edge_padding or max_y < edge_padding:
+        return [], next_pad_id
+
+    for _ in range(max_anchor_attempts):
+        anchor_x = random.randint(edge_padding, max_x)
+        anchor_y = random.randint(edge_padding, max_y)
+
+        prev_pad_id = next_pad_id
+        snap = _snapshot_canvas(canvas)
+        placed = []
+        success = True
+        for j in range(count):
+            tx = anchor_x + (j * spacing if horizontal else 0)
+            ty = anchor_y + (j * spacing if not horizontal else 0)
+            p = place_pad_at_position(
+                canvas, pad_asset, tx, ty, angle=angle, edge_padding=edge_padding
+            )
+            if p is None:
+                success = False
+                break
+            p.id = next_pad_id
+            p.attached_traces = set()
+            next_pad_id += 1
+            canvas.register_pad(p)
+            placed.append(p)
+
+        if success:
+            return placed, next_pad_id
+
+        _restore_canvas(canvas, snap)
+        next_pad_id = prev_pad_id
+
+    return [], next_pad_id
+
+
 def generate_layout_motif_based(
     canvas: CanvasState,
     pad_assets: list,
@@ -884,8 +947,7 @@ def generate_layout_motif_based(
     n_cols: int = 3,
     n_rows: int = 2,
     edge_padding: int = 10,
-    max_motif_attempts: int = 5,
-    isolated_pads: int = 8,
+    max_motif_attempts: int = 8,
     debug_log: bool = False,
 ) -> bool:
     """
@@ -953,14 +1015,42 @@ def generate_layout_motif_based(
             next_pad_id = prev_pad_id
             next_trace_id = prev_trace_id
 
-    for _ in range(max(0, isolated_pads)):
-        p = place_pad_random(canvas, random.choice(pad_assets), padding=edge_padding)
-        if p is None:
-            continue
-        p.id = next_pad_id
-        p.attached_traces = set()
-        next_pad_id += 1
-        canvas.register_pad(p)
+    # --- Isolated pad groups (organized lines, same shape per group) ---
+    # Target 6-10 isolated pads, placed in aligned 2-5-pad lines.
+    # All-or-nothing per line: if even one pad collides, we retry a new anchor.
+    n_target = random.randint(6, 10)
+    total_iso = 0
+    groups_attempted = 0
+    max_groups = 8
+
+    while total_iso < n_target and groups_attempted < max_groups:
+        groups_attempted += 1
+        remaining = n_target - total_iso
+        if remaining < 2:
+            break
+        group_size = random.randint(2, min(5, remaining))
+        pad_asset = random.choice(pad_assets)
+        angle = random.choice([0, 90])
+        horizontal = random.choice([True, False])
+        spacing = random.randint(40, 60)
+
+        # Try to fit the line; shrink group_size on failure.
+        placed_pads, next_pad_id = _try_place_isolated_line(
+            canvas, pad_asset, group_size, angle, horizontal, spacing,
+            edge_padding, next_pad_id, max_anchor_attempts=30,
+        )
+        if not placed_pads and group_size > 2:
+            placed_pads, next_pad_id = _try_place_isolated_line(
+                canvas, pad_asset, max(2, group_size - 1), angle, horizontal, spacing,
+                edge_padding, next_pad_id, max_anchor_attempts=30,
+            )
+        if not placed_pads and group_size > 3:
+            placed_pads, next_pad_id = _try_place_isolated_line(
+                canvas, pad_asset, 2, angle, horizontal, spacing,
+                edge_padding, next_pad_id, max_anchor_attempts=30,
+            )
+
+        total_iso += len(placed_pads)
 
     _rebuild_occupied_mask(canvas)
 

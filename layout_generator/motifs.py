@@ -169,31 +169,20 @@ def generate_abstract_motif_for_cell(cell: MotifCell,
     cx = ox + cw / 2.0
     cy = oy + ch / 2.0
 
-    # Build weighted list of feasible motif types
-    motif_types: List[MotifType] = [MotifType.PAD_ROW]
-    weights: List[float] = [0.25]
-
-    if available_h_lengths:
-        motif_types += [MotifType.DUAL_ROW, MotifType.PAD_PAIR, MotifType.TRACE_BUS]
-        weights     += [0.30,               0.25,               0.20]
-
-    total = sum(weights)
-    weights = [w / total for w in weights]
+    # Build weighted list of feasible motif types (all require traces — no PAD_ROW).
+    if not available_h_lengths:
+        return None
+    motif_types: List[MotifType] = [MotifType.DUAL_ROW, MotifType.PAD_PAIR, MotifType.TRACE_BUS]
+    weights: List[float] = [0.40, 0.35, 0.25]
 
     r = random.random()
     cumulative = 0.0
-    chosen = MotifType.PAD_ROW
+    chosen = motif_types[0]
     for mt, w in zip(motif_types, weights):
         cumulative += w
         if r <= cumulative:
             chosen = mt
             break
-
-    # ---- PAD_ROW ----
-    if chosen == MotifType.PAD_ROW:
-        n_pads = random.choice([3, 4, 5])
-        total_h = (n_pads - 1) * _PAD_SPACING
-        return make_pad_row(cy - total_h / 2, n_pads, _PAD_SPACING, cx)
 
     # ---- DUAL_ROW ----
     if chosen == MotifType.DUAL_ROW:
@@ -201,10 +190,7 @@ def generate_abstract_motif_for_cell(cell: MotifCell,
         if col_gap is None:
             col_gap = _pick_length(available_h_lengths, (30, 130))
         if col_gap is None:
-            # degrade
-            n_pads = random.choice([3, 4])
-            total_h = (n_pads - 1) * _PAD_SPACING
-            return make_pad_row(cy - total_h / 2, n_pads, _PAD_SPACING, cx)
+            return None
         n_pads = random.choice([3, 4])
         total_h = (n_pads - 1) * _PAD_SPACING
         left_x = cx - col_gap / 2.0
@@ -224,9 +210,7 @@ def generate_abstract_motif_for_cell(cell: MotifCell,
                 tlen = available_v_lengths[len(available_v_lengths) // 2]
             return make_pad_pair((cx, cy - tlen / 2.0), 90, tlen)
         else:
-            n_pads = random.choice([3, 4])
-            total_h = (n_pads - 1) * _PAD_SPACING
-            return make_pad_row(cy - total_h / 2, n_pads, _PAD_SPACING, cx)
+            return None
 
     # ---- TRACE_BUS ----
     if chosen == MotifType.TRACE_BUS:
@@ -235,9 +219,7 @@ def generate_abstract_motif_for_cell(cell: MotifCell,
         if tlen is None:
             tlen = _pick_length(available_h_lengths, (60, 200))
         if tlen is None:
-            n_pads = random.choice([3, 4])
-            total_h = (n_pads - 1) * _PAD_SPACING
-            return make_pad_row(cy - total_h / 2, n_pads, _PAD_SPACING, cx)
+            return None
         bus_spacing = 35
         total_h = (k - 1) * bus_spacing
         return make_trace_bus(
