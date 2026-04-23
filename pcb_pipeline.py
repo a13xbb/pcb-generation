@@ -9,7 +9,7 @@ Steps per layout:
   5. ControlNet img2img     →  images/generated/layout_N_final.png
 """
 
-from __future__ import annotations
+from __future__ import annotations 
 
 import argparse
 import os
