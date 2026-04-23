@@ -115,41 +115,72 @@ def expand_bbox(x1: int, y1: int, x2: int, y2: int,
     return x1, y1, x2, y2
 
 
-def classify_region_shape(img: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> str:
-    """Classify the shape of a pad in the given region."""
+def detect_pad_in_region(img: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> tuple:
+    """
+    Detect pad shape and size in the given region.
+    Returns (shape, pad_width, pad_height, pad_center_x, pad_center_y).
+    Coordinates are relative to the region (x1, y1).
+    """
     region = img[y1:y2, x1:x2]
     if region.size == 0:
-        return "circle"  # default fallback
+        return "circle", x2 - x1, y2 - y1, (x2 - x1) // 2, (y2 - y1) // 2
 
     # Convert to grayscale
     if len(region.shape) == 3:
         gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
     else:
-        gray = region
+        gray = region.copy()
 
     # Threshold to get binary mask (pads are typically lighter than background)
-    # Try adaptive thresholding to handle varying lighting
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Use pad classifier
-    shape, _ = classify_pad_shape(binary)
+    # Find contours to detect pad
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    if contours:
+        # Find the largest contour (likely the pad)
+        cnt = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(cnt)
+
+        # Only use if area is significant (at least 10% of region)
+        region_area = (x2 - x1) * (y2 - y1)
+        if area > region_area * 0.1:
+            # Get bounding rect of the pad
+            px, py, pw, ph = cv2.boundingRect(cnt)
+
+            # Get centroid
+            M = cv2.moments(cnt)
+            if M["m00"] > 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+            else:
+                cx, cy = px + pw // 2, py + ph // 2
+
+            # Classify shape
+            shape, _ = classify_pad_shape(binary)
+            if shape == "unknown":
+                aspect = pw / ph if ph > 0 else 1.0
+                if aspect < 0.8 or aspect > 1.25:
+                    shape = "oval"
+                else:
+                    shape = "circle"
+
+            return shape, pw, ph, cx, cy
+
+    # Fallback: use region size
+    h, w = region.shape[:2]
+    shape, _ = classify_pad_shape(binary if 'binary' in dir() else gray)
     if shape == "unknown":
-        # Fallback: use aspect ratio
-        h, w = region.shape[:2]
-        aspect = w / h if h > 0 else 1.0
-        if aspect < 0.8 or aspect > 1.25:
-            return "oval"
-        return "circle"
+        shape = "circle"
 
-    return shape
+    return shape, w, h, w // 2, h // 2
 
 
 def paste_pad(img: np.ndarray, pad_rgba: np.ndarray,
-              x1: int, y1: int, x2: int, y2: int) -> np.ndarray:
-    """Paste replacement pad onto image using alpha blending."""
-    target_w = x2 - x1
-    target_h = y2 - y1
+              center_x: int, center_y: int,
+              target_w: int, target_h: int) -> np.ndarray:
+    """Paste replacement pad onto image using alpha blending, centered at given position."""
+    img_h, img_w = img.shape[:2]
 
     if target_w <= 0 or target_h <= 0:
         return img
@@ -157,25 +188,51 @@ def paste_pad(img: np.ndarray, pad_rgba: np.ndarray,
     # Resize pad to target size
     resized = cv2.resize(pad_rgba, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
+    # Calculate paste region (centered on center_x, center_y)
+    x1 = center_x - target_w // 2
+    y1 = center_y - target_h // 2
+    x2 = x1 + target_w
+    y2 = y1 + target_h
+
+    # Clamp to image bounds
+    src_x1 = max(0, -x1)
+    src_y1 = max(0, -y1)
+    src_x2 = target_w - max(0, x2 - img_w)
+    src_y2 = target_h - max(0, y2 - img_h)
+
+    dst_x1 = max(0, x1)
+    dst_y1 = max(0, y1)
+    dst_x2 = min(img_w, x2)
+    dst_y2 = min(img_h, y2)
+
+    if dst_x2 <= dst_x1 or dst_y2 <= dst_y1:
+        return img
+
+    # Crop the resized pad to the valid region
+    pad_crop = resized[src_y1:src_y2, src_x1:src_x2]
+
     # Split into BGR and alpha
-    bgr = resized[:, :, :3]
-    alpha = resized[:, :, 3:4].astype(np.float32) / 255.0
+    bgr = pad_crop[:, :, :3]
+    alpha = pad_crop[:, :, 3:4].astype(np.float32) / 255.0
 
     # Get the target region
-    roi = img[y1:y2, x1:x2].astype(np.float32)
+    roi = img[dst_y1:dst_y2, dst_x1:dst_x2].astype(np.float32)
 
     # Alpha blend
     blended = roi * (1 - alpha) + bgr.astype(np.float32) * alpha
-    img[y1:y2, x1:x2] = blended.astype(np.uint8)
+    img[dst_y1:dst_y2, dst_x1:dst_x2] = blended.astype(np.uint8)
 
     return img
 
 
 def process_image(img_path: Path, label_path: Path,
-                  replacement_pads: dict, expand_factor: float = 1.3) -> tuple:
+                  replacement_pads: dict, expand_factor: float = 1.3,
+                  size_tolerance: float = 1.1) -> tuple:
     """
     Process a single image, replacing defective pads.
     Returns (processed_image, num_replacements).
+
+    size_tolerance: multiply detected pad size by this factor (1.1 = 10% larger)
     """
     img = cv2.imread(str(img_path))
     if img is None:
@@ -190,10 +247,23 @@ def process_image(img_path: Path, label_path: Path,
             continue
 
         # Expand bbox to capture full pad (defect bbox might be smaller)
-        x1, y1, x2, y2 = expand_bbox(x1, y1, x2, y2, expand_factor, img_w, img_h)
+        ex1, ey1, ex2, ey2 = expand_bbox(x1, y1, x2, y2, expand_factor, img_w, img_h)
 
-        # Classify pad shape
-        shape = classify_region_shape(img, x1, y1, x2, y2)
+        # Detect pad shape and size in the expanded region
+        shape, pad_w, pad_h, rel_cx, rel_cy = detect_pad_in_region(img, ex1, ey1, ex2, ey2)
+
+        # Convert relative center to absolute image coordinates
+        abs_cx = ex1 + rel_cx
+        abs_cy = ey1 + rel_cy
+
+        # Apply size tolerance (slightly larger to ensure coverage)
+        target_w = int(pad_w * size_tolerance)
+        target_h = int(pad_h * size_tolerance)
+
+        # Ensure minimum size (don't make pads too tiny)
+        min_size = 15
+        target_w = max(min_size, target_w)
+        target_h = max(min_size, target_h)
 
         # Get replacement pad
         if shape not in replacement_pads:
@@ -203,8 +273,8 @@ def process_image(img_path: Path, label_path: Path,
 
         pad = replacement_pads[shape]
 
-        # Paste replacement
-        img = paste_pad(img, pad, x1, y1, x2, y2)
+        # Paste replacement centered on detected pad location
+        img = paste_pad(img, pad, abs_cx, abs_cy, target_w, target_h)
         num_replaced += 1
 
     return img, num_replaced
@@ -226,6 +296,8 @@ def main():
                         help="Output directory for cleaned images")
     parser.add_argument("--expand_factor", type=float, default=1.3,
                         help="Factor to expand defect bbox to capture full pad")
+    parser.add_argument("--size_tolerance", type=float, default=1.1,
+                        help="Multiply detected pad size by this factor (1.1 = 10%% larger)")
     args = parser.parse_args()
 
     # Resolve paths relative to script location
@@ -262,7 +334,8 @@ def main():
 
         # Process
         result, num_replaced = process_image(
-            img_path, label_path, replacement_pads, args.expand_factor
+            img_path, label_path, replacement_pads,
+            args.expand_factor, args.size_tolerance
         )
 
         if result is None:

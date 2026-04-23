@@ -48,6 +48,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--log_every", type=int, default=20)
+    parser.add_argument("--augment", action="store_true", default=True,
+                        help="Enable data augmentation (flip, rotate, color jitter)")
+    parser.add_argument("--no_augment", action="store_false", dest="augment",
+                        help="Disable data augmentation")
     return parser.parse_args()
 
 
@@ -114,6 +118,7 @@ def main() -> None:
         resolution=args.resolution,
         max_pairs=args.max_train_pairs,
         seed=args.seed,
+        augment=args.augment,
     )
     loader = DataLoader(
         dataset,
