@@ -48,7 +48,7 @@ from utils import (  # noqa: E402
 
 PROMPT = (
     "macro photo of printed circuit board, green solder mask, "
-    "copper traces, vias, electronic components, realistic, photorealistic"
+    "realistic, photorealistic"
 )
 NEGATIVE_PROMPT = "blurry, low quality, defects, damage, cracks, burned"
 
