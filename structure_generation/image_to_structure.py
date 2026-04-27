@@ -5,6 +5,7 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from tqdm import tqdm
 
 import cv2
 import numpy as np
@@ -233,7 +234,7 @@ def process_directory(
         raise RuntimeError(f"No supported images found in: {source_root}")
 
     processed = 0
-    for image_path in image_paths:
+    for image_path in tqdm(image_paths):
         image = cv2.imread(str(image_path), cv2.IMREAD_UNCHANGED)
         if image is None:
             continue

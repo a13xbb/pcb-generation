@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
+import torch
 from PIL import Image
 from torch.utils.data import Dataset
-from torchvision import transforms
+from torchvision.transforms import v2
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -30,9 +31,11 @@ class PairedPCBControlNetDataset(Dataset):
         resolution: int,
         max_pairs: int,
         seed: int,
+        augment: bool = True,
     ) -> None:
         self.images_dir = Path(images_dir)
         self.structures_dir = Path(structures_dir)
+        self.augment = augment
         if not self.images_dir.exists():
             raise FileNotFoundError(f"Images directory does not exist: {self.images_dir}")
         if not self.structures_dir.exists():
@@ -61,29 +64,32 @@ class PairedPCBControlNetDataset(Dataset):
             records.sort(key=lambda item: item.stem)
 
         self.records = records
-        self.image_transform = transforms.Compose(
-            [
-                transforms.Resize(
-                    resolution,
-                    interpolation=transforms.InterpolationMode.BICUBIC,
-                    antialias=True,
-                ),
-                transforms.CenterCrop(resolution),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-            ]
-        )
-        self.conditioning_transform = transforms.Compose(
-            [
-                transforms.Resize(
-                    resolution,
-                    interpolation=transforms.InterpolationMode.BICUBIC,
-                    antialias=True,
-                ),
-                transforms.CenterCrop(resolution),
-                transforms.ToTensor(),
-            ]
-        )
+
+        self.resize_crop = v2.Compose([
+            v2.Resize(
+                resolution,
+                interpolation=v2.InterpolationMode.BICUBIC,
+                antialias=True,
+            ),
+            v2.CenterCrop(resolution),
+        ])
+
+        self.spatial_augment = v2.Compose([
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.RandomVerticalFlip(p=0.5),
+            v2.RandomApply([v2.RandomRotation(degrees=(90, 90))], p=0.25),
+        ])
+
+        self.color_augment = v2.Compose([
+            v2.RandomApply([
+                v2.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.02)
+            ], p=0.3),
+            v2.RandomAdjustSharpness(sharpness_factor=1.5, p=0.2),
+        ])
+
+        self.to_tensor = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
+        self.normalize = v2.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+
         self.stats = {
             "images_dir": str(self.images_dir),
             "structures_dir": str(self.structures_dir),
@@ -92,6 +98,7 @@ class PairedPCBControlNetDataset(Dataset):
             "unmatched_structures_count": len(self.unmatched_structures),
             "unmatched_images_sample": self.unmatched_images[:20],
             "unmatched_structures_sample": self.unmatched_structures[:20],
+            "augment": augment,
         }
 
     @staticmethod
@@ -121,8 +128,25 @@ class PairedPCBControlNetDataset(Dataset):
         image = Image.open(record.image_path).convert("RGB")
         structure_gray = Image.open(record.structure_path).convert("L")
         structure = Image.merge("RGB", (structure_gray, structure_gray, structure_gray))
+
+        image = self.resize_crop(image)
+        structure = self.resize_crop(structure)
+
+        if self.augment:
+            seed = torch.randint(0, 2**32, (1,)).item()
+
+            torch.manual_seed(seed)
+            image = self.spatial_augment(image)
+            torch.manual_seed(seed)
+            structure = self.spatial_augment(structure)
+
+            image = self.color_augment(image)
+
+        image_tensor = self.normalize(self.to_tensor(image))
+        structure_tensor = self.to_tensor(structure)
+
         return {
-            "pixel_values": self.image_transform(image),
-            "conditioning_pixel_values": self.conditioning_transform(structure),
+            "pixel_values": image_tensor,
+            "conditioning_pixel_values": structure_tensor,
             "stem": record.stem,
         }

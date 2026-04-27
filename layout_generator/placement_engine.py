@@ -200,8 +200,7 @@ def place_pad_random(
         return None
 
     for _ in range(max_tries):
-        # angle = random.choice([0, 90, 180, 270])
-        angle = 0
+        angle = random.choice([0, 90, 180, 270])
 
         tx = np.random.randint(edge_padding, canvas.w - edge_padding)
         ty = np.random.randint(edge_padding, canvas.h - edge_padding)
@@ -420,6 +419,151 @@ def place_pad_attached_to_open_end(
         return pad_inst, next_pad_id + 1
 
     return None, next_pad_id
+
+
+def place_pad_at_position(
+    canvas: CanvasState,
+    pad_asset: PadAsset,
+    x: float,
+    y: float,
+    angle: int = 0,
+    edge_padding: int = 10,
+) -> 'PadInstance | None':
+    """
+    Place pad_asset with its centroid at (x, y). No random sampling — deterministic.
+    Returns PadInstance on success, None on collision / out-of-bounds.
+    """
+    canvas_shape = (canvas.h, canvas.w)
+    mask_world, M = transform_mask(pad_asset.mask, angle, x, y, canvas_shape, centroid=pad_asset.centroid)
+    if M is None:
+        return None
+
+    if mask_world.ndim == 3:
+        mask_world = mask_world[:, :, 0] if mask_world.shape[2] == 1 else mask_world.any(axis=2)
+    mask_world_u8 = (mask_world > 0).astype(np.uint8)
+
+    if cv2.countNonZero(mask_world_u8) == 0:
+        return None
+    if not _fits_inside_edge_padding(mask_world_u8, canvas_shape, edge_padding):
+        return None
+    if check_collision(canvas.occupied_mask, mask_world_u8):
+        return None
+    if not _can_place_without_pad_keepout_conflict(canvas, mask_world_u8):
+        return None
+
+    bbox = _bbox_from_mask(mask_world_u8)
+    if bbox is None:
+        return None
+
+    canvas.occupied_mask |= mask_world_u8
+    _update_pad_keepout(canvas, mask_world_u8)
+
+    inst = PadInstance(pad_asset, Transform(angle, float(x), float(y)), mask_world_u8, bbox_world=bbox)
+    inst._mask_world_u8 = mask_world_u8
+    canvas.pad_instances.append(inst)
+    return inst
+
+
+def place_trace_connecting_pads(
+    canvas_state: CanvasState,
+    trace_asset: TraceAsset,
+    pad_a: PadInstance,
+    pad_b: PadInstance,
+    required_angle: int,
+    next_trace_id: int,
+    edge_padding: int = 10,
+    tolerance: float = 15.0,
+) -> 'TraceInstance | None':
+    """
+    Place trace_asset connecting two pre-placed pads.
+    Tries all (ep_idx, angle) combinations that could bridge pad_a → pad_b.
+    Both pad_end slots are filled; no OpenEnd is created.
+    Returns TraceInstance on success, None on failure.
+    """
+    canvas_shape = (canvas_state.h, canvas_state.w)
+    _ensure_pad_attach_cache(pad_a)
+    _ensure_pad_attach_cache(pad_b)
+    if pad_a._attach_center is None or pad_b._attach_center is None:
+        return None
+
+    cx_a, cy_a = pad_a._attach_center
+    cx_b, cy_b = pad_b._attach_center
+    pad_a_u8 = pad_a._mask_world_u8
+    pad_b_u8 = pad_b._mask_world_u8
+
+    pad_keepout_radius = int(getattr(canvas_state, "pad_keepout_radius", 0))
+
+    # Try both endpoints and both 180° rotations of required_angle
+    angles_to_try = [required_angle, (required_angle + 180) % 360]
+    for ep_idx in (0, 1):
+        ep_local = trace_asset.endpoints[ep_idx]
+        for angle in angles_to_try:
+            M = build_affine_align_point(
+                mask_shape=trace_asset.mask.shape,
+                centroid_xy=trace_asset.centroid,
+                angle_deg=angle,
+                point_xy=ep_local,
+                target_xy=(cx_a, cy_a),
+            )
+            mask_world = warp_mask_with_M(trace_asset.mask, M, canvas_shape)
+            mask_world_u8 = (mask_world > 0).astype(np.uint8)
+
+            if cv2.countNonZero(mask_world_u8) == 0:
+                continue
+            if not _fits_inside_edge_padding(mask_world_u8, canvas_shape, edge_padding):
+                continue
+
+            endpoints_world = transform_points(trace_asset.endpoints, M)
+            free_ep = endpoints_world[1 - ep_idx]
+            dist = float(np.sqrt((free_ep[0] - cx_b) ** 2 + (free_ep[1] - cy_b) ** 2))
+            if dist > tolerance:
+                continue
+
+            # Keepout: allow trace to pass through both pad keepout zones
+            if pad_keepout_radius > 0:
+                allowed_keepout = cv2.bitwise_or(
+                    _dilate_binary_mask(pad_a_u8, pad_keepout_radius),
+                    _dilate_binary_mask(pad_b_u8, pad_keepout_radius),
+                )
+                if not _can_place_without_pad_keepout_conflict(canvas_state, mask_world_u8, allowed_keepout):
+                    continue
+
+            # Collision: only allowed to overlap with pad_a and pad_b
+            allowed = cv2.bitwise_or(pad_a_u8, pad_b_u8)
+            overlap = cv2.bitwise_and(mask_world_u8, canvas_state.occupied_mask)
+            illegal = cv2.bitwise_and(overlap, cv2.bitwise_not(allowed))
+            if cv2.countNonZero(illegal) > 0:
+                continue
+
+            # No trace-trace intersections
+            bad = any(
+                cv2.countNonZero(cv2.bitwise_and(mask_world_u8, tr.mask_world)) > 0
+                for tr in canvas_state.trace_instances
+            )
+            if bad:
+                continue
+
+            # Success
+            c = np.array([trace_asset.centroid[0], trace_asset.centroid[1], 1.0], dtype=np.float32)
+            tx_w, ty_w = (c @ M.T)
+
+            inst = TraceInstance(
+                asset=trace_asset,
+                transform=Transform(angle, float(tx_w), float(ty_w)),
+                mask_world=mask_world_u8,
+                endpoints_world=endpoints_world,
+            )
+            inst.id = next_trace_id
+            inst.pad_end[ep_idx] = pad_a.id
+            inst.pad_end[1 - ep_idx] = pad_b.id
+            pad_a.attached_traces.add(inst.id)
+            pad_b.attached_traces.add(inst.id)
+
+            canvas_state.trace_instances.append(inst)
+            canvas_state.occupied_mask |= mask_world_u8
+            return inst
+
+    return None
 
 
 def test_pad_placement(
