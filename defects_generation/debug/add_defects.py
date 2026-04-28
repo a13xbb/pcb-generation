@@ -90,11 +90,15 @@ def _draw_annotations(image_bgr: np.ndarray, annotations: list) -> np.ndarray:
 
 
 def _parse_args() -> argparse.Namespace:
+    valid_types = list(CLASS_NAMES.values())
     p = argparse.ArgumentParser(description="Add defects to a pre-generated PCB image.")
     p.add_argument("--image",   type=str, required=True, help="Path to image.png from generate.py")
     p.add_argument("--canvas",  type=str, required=True, help="Path to canvas.pkl from generate.py")
     p.add_argument("--out_dir", type=str, default=None,  help="Output folder (default: same as --image)")
     p.add_argument("--n_defects", type=int, default=None, help="Number of defects (default: random 1-4)")
+    p.add_argument("--defect_type", type=str, default=None,
+                   choices=valid_types, metavar="TYPE",
+                   help=f"Force a single defect class. One of: {', '.join(valid_types)}. Default: random.")
     p.add_argument("--seed",    type=int, default=42)
     return p.parse_args()
 
@@ -128,15 +132,22 @@ def main() -> None:
         canvas = pickle.load(f)
     print(f"Loaded canvas: {len(canvas.pad_instances)} pads, {len(canvas.trace_instances)} traces")
 
-    # Determine defect count
+    # Determine defect count and type
     rng = np.random.default_rng(args.seed)
     n_defects = args.n_defects if args.n_defects is not None else int(rng.integers(1, 5))
 
-    print(f"Adding {n_defects} defects (seed={args.seed})...")
+    defect_weights = None
+    if args.defect_type is not None:
+        class_id = next(k for k, v in CLASS_NAMES.items() if v == args.defect_type)
+        defect_weights = {i: (1.0 if i == class_id else 0.0) for i in range(6)}
+
+    type_label = args.defect_type or "random"
+    print(f"Adding {n_defects}× {type_label} (seed={args.seed})...")
     defected_bgr, annotations = add_defects(
         image=image_bgr,
         canvas=canvas,
         n_defects=n_defects,
+        defect_weights=defect_weights,
         seed=args.seed,
     )
 
