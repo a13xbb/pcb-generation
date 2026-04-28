@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, TYPE_CHECKING
 
 import cv2
 import numpy as np
@@ -11,6 +11,9 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "layout_generator"))
 
 from utils import skeletonize, find_endpoints, skeleton_path_length_between_endpoints
+
+if TYPE_CHECKING:
+    from layout_generator.classes import CanvasState
 
 
 MIN_TRACE_LENGTH = 50
@@ -57,6 +60,23 @@ def find_trace_edge_points(
         results.append((int(x), int(y), normal_angle))
 
     return results
+
+
+def find_trace_edge_points_away_from_pads(
+    trace_mask: np.ndarray,
+    canvas: "CanvasState",
+    sample_count: int = 20,
+    pad_buffer: int = 10,
+) -> List[Tuple[int, int, float]]:
+    pad_mask = np.zeros_like(trace_mask)
+    for pad in canvas.pad_instances:
+        pad_mask = np.maximum(pad_mask, pad.mask_world)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (pad_buffer * 2 + 1, pad_buffer * 2 + 1))
+    pad_zone = cv2.dilate(pad_mask, kernel)
+
+    all_points = find_trace_edge_points(trace_mask, sample_count * 3)
+    return [(x, y, angle) for x, y, angle in all_points if pad_zone[y, x] == 0]
 
 
 def compute_outward_normal(mask: np.ndarray, x: int, y: int, radius: int = 5) -> float:

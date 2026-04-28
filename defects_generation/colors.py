@@ -22,6 +22,32 @@ def sample_background_color(
     return tuple(mean_color.tolist())
 
 
+def sample_dark_background_color(
+    image: np.ndarray,
+    occupied_mask: np.ndarray,
+    percentile: float = 20.0,
+) -> Tuple[int, int, int]:
+    h, w = image.shape[:2]
+    mask_resized = cv2.resize(occupied_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+    bg_mask = (mask_resized == 0)
+
+    if not np.any(bg_mask):
+        return (30, 100, 20)  # dark green default
+
+    bg_pixels = image[bg_mask]
+    # Compute brightness (sum of BGR channels)
+    brightness = bg_pixels.sum(axis=1)
+    # Find the threshold for darkest percentile
+    threshold = np.percentile(brightness, percentile)
+    dark_pixels = bg_pixels[brightness <= threshold]
+
+    if len(dark_pixels) == 0:
+        dark_pixels = bg_pixels
+
+    mean_color = np.mean(dark_pixels, axis=0).astype(int)
+    return tuple(mean_color.tolist())
+
+
 def sample_trace_color(
     image: np.ndarray,
     trace_mask: np.ndarray,
