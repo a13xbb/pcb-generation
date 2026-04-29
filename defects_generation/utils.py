@@ -79,6 +79,46 @@ def find_trace_edge_points_away_from_pads(
     return [(x, y, angle) for x, y, angle in all_points if pad_zone[y, x] == 0]
 
 
+def measure_trace_width_along_normal(
+    trace_mask: np.ndarray,
+    edge_x: int,
+    edge_y: int,
+    inward_angle: float,
+    max_distance: int = 100,
+) -> Optional[int]:
+    """
+    Measure trace width by shooting a ray from edge point inward.
+
+    Edge points from dilation are slightly outside the trace. This function
+    finds where the ray enters the trace, then exits on the other side.
+
+    Returns width in pixels, or None if measurement fails.
+    """
+    h, w = trace_mask.shape
+    cos_a = np.cos(inward_angle)
+    sin_a = np.sin(inward_angle)
+
+    entry_dist = None
+
+    for dist in range(max_distance):
+        nx = int(edge_x + dist * cos_a)
+        ny = int(edge_y + dist * sin_a)
+
+        if not (0 <= nx < w and 0 <= ny < h):
+            return None
+
+        in_trace = trace_mask[ny, nx] > 0
+
+        if entry_dist is None:
+            if in_trace:
+                entry_dist = dist
+        else:
+            if not in_trace:
+                return dist - entry_dist
+
+    return None
+
+
 def compute_outward_normal(mask: np.ndarray, x: int, y: int, radius: int = 5) -> float:
     h, w = mask.shape
     x1 = max(0, x - radius)

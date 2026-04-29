@@ -7,7 +7,7 @@ import numpy as np
 
 from .colors import sample_dark_background_color
 from .types import DefectAnnotation, DefectResult, CLASS_IDS
-from .utils import filter_long_traces, find_trace_edge_points_away_from_pads, get_trace_width_at_point
+from .utils import filter_long_traces, find_trace_edge_points_away_from_pads, measure_trace_width_along_normal
 
 if TYPE_CHECKING:
     from layout_generator.classes import CanvasState
@@ -39,8 +39,8 @@ def _create_bite_shape(
     base_x = int(edge_x - outward_offset * cos_a)
     base_y = int(edge_y - outward_offset * sin_a)
 
-    # Add extra depth to reach into the visual trace from outside
-    effective_depth = bite_depth + 4
+    # Use bite_depth directly (already in image pixels)
+    effective_depth = bite_depth
 
     if shape_type == "semi_ellipse":
         width_variation = rng.uniform(0.6, 1.2)
@@ -115,38 +115,53 @@ def generate_mouse_bite(
     if not edge_points:
         return DefectResult(success=False)
 
-    ex, ey, normal_angle = edge_points[rng.integers(len(edge_points))]
-
-    trace_width = get_trace_width_at_point(trace.mask_world, (ex, ey), normal_angle)
-    if trace_width < 5:
-        trace_width = 10
-
     h, w = image.shape[:2]
     mask_h, mask_w = canvas.occupied_mask.shape
     scale_x = w / mask_w
     scale_y = h / mask_h
 
-    # Bite depth: 10-25% of trace width with hard cap at 6 pixels
-    # (visual trace is often thinner than canvas mask due to diffusion)
-    bite_depth_ratio = rng.uniform(0.10, 0.25)
-    bite_depth = int(trace_width * bite_depth_ratio)
-    bite_depth = max(2, min(bite_depth, 6))
+    # Try edge points until we find one where we can measure width
+    indices = rng.permutation(len(edge_points))
+    selected_point = None
+    trace_width_canvas = None
+
+    for idx in indices:
+        ex, ey, normal_angle = edge_points[idx]
+        inward_angle = normal_angle + np.pi
+        width = measure_trace_width_along_normal(
+            trace.mask_world, ex, ey, inward_angle
+        )
+        if width is not None and width >= 6:
+            selected_point = (ex, ey, normal_angle)
+            trace_width_canvas = width
+            break
+
+    if selected_point is None:
+        return DefectResult(success=False)
+
+    ex, ey, normal_angle = selected_point
+    inward_angle = normal_angle + np.pi
+
+    # Bite depth is 30-70% of measured trace width
+    depth_fraction = rng.uniform(0.3, 0.7)
+    bite_depth_canvas = int(trace_width_canvas * depth_fraction)
+
+    # Scale to image pixels
+    avg_scale = (scale_x + scale_y) / 2
+    bite_depth_img = max(3, int(bite_depth_canvas * avg_scale))
+    bite_width_img = rng.integers(min_bite_width, max_bite_width + 1)
 
     ex_img = int(ex * scale_x)
     ey_img = int(ey * scale_y)
-    bite_depth_img = max(4, int(bite_depth * scale_y))
-    bite_width_img = rng.integers(min_bite_width, max_bite_width + 1)
-
-    inward_angle = normal_angle + np.pi
 
     # Create varied bite shape
     bite_mask = _create_bite_shape(
         rng, ex_img, ey_img, inward_angle, bite_depth_img, bite_width_img, (h, w)
     )
 
-    # Scale trace mask and dilate to account for visual trace being wider
+    # Scale trace mask and dilate slightly to account for visual trace being wider
     trace_mask_scaled = cv2.resize(trace.mask_world, (w, h), interpolation=cv2.INTER_NEAREST)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     trace_mask_dilated = cv2.dilate(trace_mask_scaled, kernel)
     bite_mask = ((bite_mask > 0) & (trace_mask_dilated > 0)).astype(np.uint8) * 255
 
