@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Any
 
 import numpy as np
 
@@ -25,6 +25,7 @@ class DefectAnnotation:
     center_y: float
     width: float
     height: float
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_yolo_line(self) -> str:
         return f"{self.class_id} {self.center_x:.4f} {self.center_y:.4f} {self.width:.4f} {self.height:.4f}"
@@ -34,12 +35,13 @@ class DefectAnnotation:
         class_id: int,
         x1: int, y1: int, x2: int, y2: int,
         img_w: int, img_h: int,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> "DefectAnnotation":
         cx = (x1 + x2) / 2.0 / img_w
         cy = (y1 + y2) / 2.0 / img_h
         w = (x2 - x1) / img_w
         h = (y2 - y1) / img_h
-        return DefectAnnotation(class_id, cx, cy, w, h)
+        return DefectAnnotation(class_id, cx, cy, w, h, metadata or {})
 
 
 @dataclass

@@ -57,6 +57,10 @@ def _draw_annotations(image_bgr: np.ndarray, annotations: list) -> np.ndarray:
         color = _CLASS_COLORS.get(ann.class_id, (255, 255, 255))
         label = CLASS_NAMES[ann.class_id]
 
+        # Add metadata to label if present
+        if ann.metadata.get("depth_pct"):
+            label = f"{label} {ann.metadata['depth_pct']}%"
+
         cx = int(ann.center_x * w)
         cy = int(ann.center_y * h)
         bw = int(ann.width * w)

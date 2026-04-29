@@ -32,12 +32,10 @@ def _create_bite_shape(
     perp_cos = np.cos(inward_angle + np.pi / 2)
     perp_sin = np.sin(inward_angle + np.pi / 2)
 
-    # Start bite from OUTSIDE the canvas edge to account for visual trace
-    # being wider than canvas mask (due to diffusion). The bite will extend
-    # inward from this point.
-    outward_offset = 2  # pixels outside canvas edge
-    base_x = int(edge_x - outward_offset * cos_a)
-    base_y = int(edge_y - outward_offset * sin_a)
+    # Start bite from the edge point itself (edge detection places points
+    # slightly outside trace, which is already accounted for)
+    base_x = edge_x
+    base_y = edge_y
 
     # Use bite_depth directly (already in image pixels)
     effective_depth = bite_depth
@@ -46,15 +44,26 @@ def _create_bite_shape(
         width_variation = rng.uniform(0.6, 1.2)
         depth_variation = rng.uniform(0.8, 1.0)
 
-        center_x = int(base_x + effective_depth * 0.5 * cos_a)
-        center_y = int(base_y + effective_depth * 0.5 * sin_a)
+        half_width = max(3, int(bite_width * width_variation / 2))
+        depth = max(3, int(effective_depth * depth_variation))
 
-        axes = (
-            max(3, int(bite_width * width_variation / 2)),
-            max(3, int(effective_depth * depth_variation / 2))
-        )
-        angle_deg = int(np.degrees(inward_angle))
-        cv2.ellipse(bite_mask, (center_x, center_y), axes, angle_deg, 0, 360, 255, -1)
+        # Create half-ellipse that only extends INWARD from base
+        # Generate points along the arc from one side to the other
+        n_arc_points = 15
+        points = []
+        for i in range(n_arc_points):
+            # t goes from -1 to 1 (left edge to right edge of ellipse)
+            t = -1 + 2 * i / (n_arc_points - 1)
+            # Ellipse: at position t along width, depth is sqrt(1 - t^2) * max_depth
+            arc_depth = depth * np.sqrt(max(0, 1 - t * t))
+            arc_width = t * half_width
+            # Convert to image coordinates
+            px = int(base_x + arc_depth * cos_a + arc_width * perp_cos)
+            py = int(base_y + arc_depth * sin_a + arc_width * perp_sin)
+            points.append([px, py])
+
+        pts = np.array(points, np.int32)
+        cv2.fillPoly(bite_mask, [pts], 255)
 
     elif shape_type == "triangle":
         tip_depth = effective_depth * rng.uniform(0.7, 0.95)
@@ -165,7 +174,9 @@ def generate_mouse_bite(
     trace_mask_dilated = cv2.dilate(trace_mask_scaled, kernel)
     bite_mask = ((bite_mask > 0) & (trace_mask_dilated > 0)).astype(np.uint8) * 255
 
-    if bite_mask.sum() == 0:
+    # Verify bite actually overlaps with original trace (not just dilated buffer)
+    overlap_with_trace = np.sum((bite_mask > 0) & (trace_mask_scaled > 0))
+    if overlap_with_trace < 5:
         return DefectResult(success=False)
 
     # Sample dark background color (darkest 20% of background pixels)
@@ -185,7 +196,8 @@ def generate_mouse_bite(
     y2 = int(bite_ys.max())
 
     annotation = DefectAnnotation.from_pixel_bbox(
-        CLASS_IDS["mouse_bite"], x1, y1, x2, y2, w, h
+        CLASS_IDS["mouse_bite"], x1, y1, x2, y2, w, h,
+        metadata={"depth_pct": int(depth_fraction * 100)}
     )
 
     return DefectResult(success=True, annotation=annotation)

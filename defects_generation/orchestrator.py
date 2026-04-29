@@ -13,6 +13,20 @@ from .short import generate_short
 from .spur import generate_spur
 from .spurious_copper import generate_spurious_copper
 
+
+def _overlaps_existing(
+    new_ann: DefectAnnotation,
+    existing: List[DefectAnnotation],
+    min_distance: float = 0.02,
+) -> bool:
+    """Check if new annotation overlaps with any existing one."""
+    for ann in existing:
+        dx = abs(new_ann.center_x - ann.center_x)
+        dy = abs(new_ann.center_y - ann.center_y)
+        if dx < min_distance and dy < min_distance:
+            return True
+    return False
+
 if TYPE_CHECKING:
     from layout_generator.classes import CanvasState
 
@@ -53,8 +67,9 @@ def add_defects(
         for attempt in range(max_attempts_per_defect):
             result = generator(image, canvas, rng)
             if result.success and result.annotation is not None:
-                annotations.append(result.annotation)
-                break
+                if not _overlaps_existing(result.annotation, annotations):
+                    annotations.append(result.annotation)
+                    break
 
     return image, annotations
 
