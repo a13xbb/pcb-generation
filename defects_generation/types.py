@@ -10,9 +10,9 @@ CLASS_NAMES = {
     0: "mouse_bite",
     1: "spur",
     2: "missing_hole",
-    3: "short",
-    4: "open_circuit",
-    5: "spurious_copper",
+    3: "open_circuit",
+    # 4: "spurious_copper",
+    # 5: "short",
 }
 
 CLASS_IDS = {v: k for k, v in CLASS_NAMES.items()}

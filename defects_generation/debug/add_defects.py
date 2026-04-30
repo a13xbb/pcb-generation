@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from defects_generation.orchestrator import add_defects, save_yolo_labels  # noqa: E402
+from defects_generation.orchestrator import add_defects, save_yolo_labels, DEFECT_GENERATORS  # noqa: E402
 from defects_generation.types import CLASS_NAMES  # noqa: E402
 
 
@@ -43,8 +43,8 @@ _CLASS_COLORS = {
     0: (0,   200, 255),   # mouse_bite    — yellow-orange
     1: (255, 100,   0),   # spur          — blue
     2: (0,    80, 255),   # missing_hole  — red
-    3: (255,   0, 180),   # short         — magenta
-    4: (0,   255, 100),   # open_circuit  — green
+    3: (255,   0, 180),   # open_circuit  — magenta
+    4: (0,   255, 100),   # short         — green
     5: (200,   0, 255),   # spurious_copper — purple
 }
 
@@ -143,7 +143,7 @@ def main() -> None:
     defect_weights = None
     if args.defect_type is not None:
         class_id = next(k for k, v in CLASS_NAMES.items() if v == args.defect_type)
-        defect_weights = {i: (1.0 if i == class_id else 0.0) for i in range(6)}
+        defect_weights = {i: (1.0 if i == class_id else 0.0) for i in DEFECT_GENERATORS}
 
     type_label = args.defect_type or "random"
     print(f"Adding {n_defects}× {type_label} (seed={args.seed})...")

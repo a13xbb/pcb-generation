@@ -9,9 +9,9 @@ from .types import DefectAnnotation, DefectResult, CLASS_NAMES
 from .missing_hole import generate_missing_hole
 from .mouse_bite import generate_mouse_bite
 from .open_circuit import generate_open_circuit
-from .short import generate_short
+# from .short import generate_short
 from .spur import generate_spur
-from .spurious_copper import generate_spurious_copper
+# from .spurious_copper import generate_spurious_copper
 
 
 def _overlaps_existing(
@@ -35,9 +35,9 @@ DEFECT_GENERATORS = {
     0: generate_mouse_bite,
     1: generate_spur,
     2: generate_missing_hole,
-    3: generate_short,
-    4: generate_open_circuit,
-    5: generate_spurious_copper,
+    3: generate_open_circuit,
+    # 4: generate_spurious_copper,
+    # 5: generate_short,
 }
 
 
@@ -52,7 +52,7 @@ def add_defects(
     rng = np.random.default_rng(seed)
 
     if defect_weights is None:
-        defect_weights = {i: 1.0 for i in range(6)}
+        defect_weights = {i: 1.0 for i in DEFECT_GENERATORS}
 
     class_ids = list(defect_weights.keys())
     weights = np.array([defect_weights[i] for i in class_ids])
