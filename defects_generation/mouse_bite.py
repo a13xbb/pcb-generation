@@ -151,8 +151,8 @@ def generate_mouse_bite(
     ex, ey, normal_angle = selected_point
     inward_angle = normal_angle + np.pi
 
-    # Bite depth is 30-70% of measured trace width
-    depth_fraction = rng.uniform(0.3, 0.7)
+    # Bite depth is 30-80% of measured trace width
+    depth_fraction = rng.uniform(0.3, 0.8)
     bite_depth_canvas = int(trace_width_canvas * depth_fraction)
 
     # Scale to image pixels
