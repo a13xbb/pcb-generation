@@ -5,103 +5,132 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 
-from .colors import sample_trace_color, add_noise_to_color
+from .colors import sample_midtone_trace_color, add_noise_to_color
 from .types import DefectAnnotation, DefectResult, CLASS_IDS
-from .utils import find_background_region
 
 if TYPE_CHECKING:
     from layout_generator.classes import CanvasState
+
+
+def _rounded_rect_mask(
+    cx: int,
+    cy: int,
+    rw: int,
+    rh: int,
+    corner_r: int,
+    angle_deg: float,
+    img_shape: tuple,
+) -> np.ndarray:
+    corner_r = max(2, min(corner_r, rw // 2 - 1, rh // 2 - 1))
+    hw = rw / 2
+    hh = rh / 2
+
+    # Corner centers in local space and their arc start angles
+    corners = [
+        ( hw - corner_r,  hh - corner_r,   0),
+        (-hw + corner_r,  hh - corner_r,  90),
+        (-hw + corner_r, -hh + corner_r, 180),
+        ( hw - corner_r, -hh + corner_r, 270),
+    ]
+
+    n_per_corner = 10
+    points = []
+    for ccx, ccy, start_a in corners:
+        for i in range(n_per_corner):
+            a = np.radians(start_a + i * 90 / (n_per_corner - 1))
+            points.append([ccx + corner_r * np.cos(a), ccy + corner_r * np.sin(a)])
+
+    pts = np.array(points, dtype=np.float32)
+    angle_rad = np.radians(angle_deg)
+    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+    rot = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+    pts = (pts @ rot.T + [cx, cy]).astype(np.int32)
+
+    h, w = img_shape
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, [pts], 255)
+    return mask
 
 
 def generate_spurious_copper(
     image: np.ndarray,
     canvas: "CanvasState",
     rng: np.random.Generator,
-    min_blob_size: int = 15,
-    max_blob_size: int = 40,
+    min_w: int = 15,
+    max_w: int = 45,
+    clearance: int = 12,
 ) -> DefectResult:
-    region = find_background_region(canvas.occupied_mask, min_area=500, erosion_size=20)
-
-    if region is None:
+    traces = canvas.trace_instances
+    if not traces:
         return DefectResult(success=False)
 
-    rx1, ry1, rx2, ry2 = region
+    # Sample midtone color from all traces combined for a stable, consistent green
+    combined_trace_mask = np.zeros_like(canvas.occupied_mask)
+    for t in traces:
+        combined_trace_mask = np.maximum(combined_trace_mask, t.mask_world)
+    base_color = sample_midtone_trace_color(image, combined_trace_mask)
+
+    # Optionally darken slightly (80–100% brightness)
+    darkness = rng.uniform(0.80, 1.0)
+    trace_color = tuple(int(c * darkness) for c in base_color)
+    trace_color = add_noise_to_color(trace_color, sigma=3.0, rng=rng)
 
     h, w = image.shape[:2]
     mask_h, mask_w = canvas.occupied_mask.shape
-    scale_x = w / mask_w
-    scale_y = h / mask_h
 
-    rx1_img = int(rx1 * scale_x)
-    ry1_img = int(ry1 * scale_y)
-    rx2_img = int(rx2 * scale_x)
-    ry2_img = int(ry2 * scale_y)
+    # Shape dimensions: long side 2–4× the short side
+    long_side = rng.integers(min_w, max_w + 1)
+    ratio = rng.uniform(2.0, 4.0)
+    short_side = max(6, int(long_side / ratio))
+    rw, rh = long_side, short_side
+    half_diag = int(np.sqrt(rw ** 2 + rh ** 2) / 2) + 2
 
-    margin = max_blob_size
-    cx = rng.integers(rx1_img + margin, max(rx1_img + margin + 1, rx2_img - margin))
-    cy = rng.integers(ry1_img + margin, max(ry1_img + margin + 1, ry2_img - margin))
+    # Build exclusion zone: dilate occupied mask by shape half-diagonal + clearance
+    occupied_scaled = cv2.resize(canvas.occupied_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+    pad = half_diag + clearance
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (pad * 2 + 1, pad * 2 + 1))
+    exclusion = cv2.dilate(occupied_scaled, kernel)
 
-    trace_color = sample_trace_color(image, canvas.occupied_mask)
-    trace_color = add_noise_to_color(trace_color, sigma=8.0, rng=rng)
+    # Mask out near-white image border areas (brightness > 200 across all channels)
+    # These are the white padding regions at the edges of generated PCB images
+    gray = image.min(axis=2)  # min of BGR — white pixels have high min
+    white_border = (gray > 200).astype(np.uint8)
+    exclusion = np.maximum(exclusion, white_border)
 
-    shape_type = rng.choice(["ellipse", "rect", "irregular"])
+    # Valid center positions: not in exclusion zone, at least 20px from image edge
+    border = half_diag + 20
+    if border >= h // 2 or border >= w // 2:
+        border = half_diag + 2
+    valid_ys, valid_xs = np.where(exclusion[border:h - border, border:w - border] == 0)
+    if len(valid_xs) == 0:
+        return DefectResult(success=False)
 
-    if shape_type == "ellipse":
-        axis1 = rng.integers(min_blob_size // 2, max_blob_size // 2 + 1)
-        axis2 = rng.integers(min_blob_size // 2, max_blob_size // 2 + 1)
-        angle = rng.integers(0, 180)
-        cv2.ellipse(image, (cx, cy), (axis1, axis2), angle, 0, 360, trace_color, -1)
-        half_size = max(axis1, axis2)
-        x1, y1 = cx - half_size, cy - half_size
-        x2, y2 = cx + half_size, cy + half_size
+    valid_xs = valid_xs + border
+    valid_ys = valid_ys + border
 
-    elif shape_type == "rect":
-        rw = rng.integers(min_blob_size, max_blob_size + 1)
-        rh = rng.integers(min_blob_size // 2, max_blob_size // 2 + 1)
-        angle = rng.uniform(0, 360)
+    idx = rng.integers(len(valid_xs))
+    cx, cy = int(valid_xs[idx]), int(valid_ys[idx])
 
-        rect_pts = np.array([
-            [-rw / 2, -rh / 2],
-            [rw / 2, -rh / 2],
-            [rw / 2, rh / 2],
-            [-rw / 2, rh / 2],
-        ])
+    corner_r = int(min(rw, rh) * rng.uniform(0.2, 0.5))
+    angle_deg = rng.uniform(0, 360)
 
-        cos_a = np.cos(np.radians(angle))
-        sin_a = np.sin(np.radians(angle))
-        rot_matrix = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
-        rect_pts = rect_pts @ rot_matrix.T
-        rect_pts = rect_pts + [cx, cy]
-        rect_pts = rect_pts.astype(np.int32)
+    shape_mask = _rounded_rect_mask(cx, cy, rw, rh, corner_r, angle_deg, (h, w))
 
-        cv2.fillPoly(image, [rect_pts], trace_color)
+    # Verify shape doesn't touch any occupied area
+    if np.any((shape_mask > 0) & (occupied_scaled > 0)):
+        return DefectResult(success=False)
 
-        x1 = rect_pts[:, 0].min()
-        y1 = rect_pts[:, 1].min()
-        x2 = rect_pts[:, 0].max()
-        y2 = rect_pts[:, 1].max()
+    spur_pixels = np.sum(shape_mask > 0)
+    if spur_pixels < 20:
+        return DefectResult(success=False)
 
-    else:
-        n_pts = rng.integers(4, 8)
-        angles = np.sort(rng.uniform(0, 2 * np.pi, n_pts))
-        radii = rng.uniform(min_blob_size / 2, max_blob_size / 2, n_pts)
+    # Textured fill
+    noise = rng.normal(0, 5.0, (h, w, 3))
+    textured = np.clip(np.array(trace_color) + noise, 0, 255).astype(np.uint8)
+    image[shape_mask > 0] = textured[shape_mask > 0]
 
-        pts = np.zeros((n_pts, 2), dtype=np.int32)
-        for i, (a, r) in enumerate(zip(angles, radii)):
-            pts[i, 0] = int(cx + r * np.cos(a))
-            pts[i, 1] = int(cy + r * np.sin(a))
-
-        cv2.fillPoly(image, [pts], trace_color)
-
-        x1 = pts[:, 0].min()
-        y1 = pts[:, 1].min()
-        x2 = pts[:, 0].max()
-        y2 = pts[:, 1].max()
-
-    x1 = max(0, x1)
-    y1 = max(0, y1)
-    x2 = min(w, x2)
-    y2 = min(h, y2)
+    ys, xs = np.where(shape_mask > 0)
+    x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
 
     annotation = DefectAnnotation.from_pixel_bbox(
         CLASS_IDS["spurious_copper"], x1, y1, x2, y2, w, h

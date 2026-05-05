@@ -64,6 +64,33 @@ def sample_trace_color(
     return tuple(mean_color.tolist())
 
 
+def sample_midtone_trace_color(
+    image: np.ndarray,
+    trace_mask: np.ndarray,
+    low_pct: float = 30.0,
+    high_pct: float = 70.0,
+) -> Tuple[int, int, int]:
+    """Sample color from mid-brightness trace pixels — avoids dark edges and white highlights."""
+    h, w = image.shape[:2]
+    mask_resized = cv2.resize(trace_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+    trace_pixels_mask = (mask_resized > 0)
+
+    if not np.any(trace_pixels_mask):
+        return (160, 160, 160)
+
+    trace_pixels = image[trace_pixels_mask]
+    brightness = trace_pixels.sum(axis=1)
+    lo = np.percentile(brightness, low_pct)
+    hi = np.percentile(brightness, high_pct)
+    mid_pixels = trace_pixels[(brightness >= lo) & (brightness <= hi)]
+
+    if len(mid_pixels) == 0:
+        mid_pixels = trace_pixels
+
+    mean_color = np.mean(mid_pixels, axis=0).astype(int)
+    return tuple(mean_color.tolist())
+
+
 def sample_trace_center_color(
     image: np.ndarray,
     trace_mask: np.ndarray,

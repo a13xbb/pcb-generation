@@ -11,19 +11,21 @@ from .mouse_bite import generate_mouse_bite
 from .open_circuit import generate_open_circuit
 # from .short import generate_short
 from .spur import generate_spur
-# from .spurious_copper import generate_spurious_copper
+from .spurious_copper import generate_spurious_copper
 
 
 def _overlaps_existing(
     new_ann: DefectAnnotation,
     existing: List[DefectAnnotation],
-    min_distance: float = 0.02,
+    padding: float = 0.01,
 ) -> bool:
-    """Check if new annotation overlaps with any existing one."""
+    """Check if new annotation bbox overlaps with any existing one (with padding)."""
     for ann in existing:
         dx = abs(new_ann.center_x - ann.center_x)
         dy = abs(new_ann.center_y - ann.center_y)
-        if dx < min_distance and dy < min_distance:
+        min_x_gap = (new_ann.width + ann.width) / 2 + padding
+        min_y_gap = (new_ann.height + ann.height) / 2 + padding
+        if dx < min_x_gap and dy < min_y_gap:
             return True
     return False
 
@@ -36,7 +38,7 @@ DEFECT_GENERATORS = {
     1: generate_spur,
     2: generate_missing_hole,
     3: generate_open_circuit,
-    # 4: generate_spurious_copper,
+    4: generate_spurious_copper,
     # 5: generate_short,
 }
 

@@ -11,7 +11,7 @@ CLASS_NAMES = {
     1: "spur",
     2: "missing_hole",
     3: "open_circuit",
-    # 4: "spurious_copper",
+    4: "spurious_copper",
     # 5: "short",
 }
 
