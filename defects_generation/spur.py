@@ -258,8 +258,8 @@ def generate_spur(
 
     spur_length_img = max(9, int(extension_canvas * avg_scale))
     trace_width_img = max(1, int(trace_width_canvas * avg_scale))
-    # Width must be substantial for triangle/semicircle shapes to be visible (not line-like)
-    spur_width_img = max(10, int(trace_width_img * rng.uniform(0.6, 1.0)))
+    # Width along trace edge: varies from narrow (trace width) to wide (2.5x trace width)
+    spur_width_img = max(12, min(45, int(trace_width_img * rng.uniform(0.8, 2.5))))
 
     # Create spur shape starting at trace edge, extending outward
     spur_mask = _create_spur_shape(
