@@ -67,11 +67,16 @@ def add_defects(
         generator = DEFECT_GENERATORS[class_id]
 
         for attempt in range(max_attempts_per_defect):
-            result = generator(image, canvas, rng)
+            # Work on a copy so we can discard if overlap detected
+            image_copy = image.copy()
+            result = generator(image_copy, canvas, rng)
             if result.success and result.annotation is not None:
                 if not _overlaps_existing(result.annotation, annotations):
+                    # Commit changes to actual image
+                    np.copyto(image, image_copy)
                     annotations.append(result.annotation)
                     break
+                # else: discard image_copy, defect not committed
 
     return image, annotations
 

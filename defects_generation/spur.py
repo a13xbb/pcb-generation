@@ -127,8 +127,6 @@ def generate_spur(
     image: np.ndarray,
     canvas: "CanvasState",
     rng: np.random.Generator,
-    min_spur_width: int = 8,
-    max_spur_width: int = 18,
 ) -> DefectResult:
     long_traces = filter_long_traces(canvas.trace_instances)
     if not long_traces:
@@ -221,8 +219,8 @@ def generate_spur(
             if hw < 3:
                 continue
 
-            # Check if there's space beyond trace edge
-            check_dist = hw + 15
+            # Check if there's space beyond trace edge for at least minimum extension
+            check_dist = hw + 20
             check_x = int(sx + check_dist * np.cos(perp_angle))
             check_y = int(sy + check_dist * np.sin(perp_angle))
 
@@ -244,26 +242,28 @@ def generate_spur(
         return DefectResult(success=False)
 
     sx, sy = selected_point
+    trace_width_canvas = 2 * half_width_canvas
 
-    # Spur extends from center, 65-100% past the edge
-    # Total length = half_width (to reach edge) + 65-100% of half_width (beyond edge)
-    extension_fraction = rng.uniform(0.65, 1.0)
-    spur_length_canvas = int(half_width_canvas * (1 + extension_fraction))
+    # Extension beyond trace edge: 50-100% of trace width, minimum 15 canvas px for visibility
+    extension_canvas = max(15, int(trace_width_canvas * rng.uniform(0.5, 1.0)))
 
     h, w = image.shape[:2]
     scale_x = w / w_m
     scale_y = h / h_m
     avg_scale = (scale_x + scale_y) / 2
 
-    spur_length_img = max(5, int(spur_length_canvas * avg_scale))
-    spur_width_img = rng.integers(min_spur_width, max_spur_width + 1)
+    # Anchor spur at the trace EDGE (not skeleton center) so it is always visually attached
+    edge_x_img = int((sx + half_width_canvas * np.cos(outward_angle)) * scale_x)
+    edge_y_img = int((sy + half_width_canvas * np.sin(outward_angle)) * scale_y)
 
-    sx_img = int(sx * scale_x)
-    sy_img = int(sy * scale_y)
+    spur_length_img = max(9, int(extension_canvas * avg_scale))
+    trace_width_img = max(1, int(trace_width_canvas * avg_scale))
+    # Width must be substantial for triangle/semicircle shapes to be visible (not line-like)
+    spur_width_img = max(10, int(trace_width_img * rng.uniform(0.6, 1.0)))
 
-    # Create spur shape
+    # Create spur shape starting at trace edge, extending outward
     spur_mask = _create_spur_shape(
-        rng, sx_img, sy_img, outward_angle, spur_length_img, spur_width_img, (h, w)
+        rng, edge_x_img, edge_y_img, outward_angle, spur_length_img, spur_width_img, (h, w)
     )
 
     # Mask out areas that overlap with other traces (except the source trace)
@@ -301,7 +301,7 @@ def generate_spur(
 
     annotation = DefectAnnotation.from_pixel_bbox(
         CLASS_IDS["spur"], x1, y1, x2, y2, w, h,
-        metadata={"extension_pct": int(extension_fraction * 100)}
+        metadata={"extension_px": extension_canvas}
     )
 
     return DefectResult(success=True, annotation=annotation)
