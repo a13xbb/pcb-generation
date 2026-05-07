@@ -46,6 +46,9 @@ from utils import (  # noqa: E402
     skeletonize,
 )
 
+sys.path.insert(0, str(_ROOT))
+from defects_generation.orchestrator import add_defects, save_yolo_labels  # noqa: E402
+
 PROMPT = (
     "macro photo of printed circuit board, green solder mask, "
     "realistic, photorealistic"
@@ -106,12 +109,12 @@ def _apply_borders(img_bgr: np.ndarray, occupied_mask: np.ndarray, border_px: in
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="End-to-end PCB synthesis pipeline.")
-    p.add_argument("--n_layouts", type=int, default=5)
-    p.add_argument("--controlnet_path", type=str, default="trained/controlnet_600x600")
-    p.add_argument("--lora_path", type=str, default="trained/lora_600x600")
-    p.add_argument("--output_dir", type=str, default="images/generated")
-    p.add_argument("--layout_dir", type=str, default="images/layouts")
-    p.add_argument("--structure_dir", type=str, default="images/structure_maps")
+    p.add_argument("--n_layouts", type=int, default=1)
+    p.add_argument("--controlnet_path", type=str, default="trained/controlnet_aug_600x600")
+    p.add_argument("--lora_path", type=str, default="trained/lora_aug_600x600")
+    p.add_argument("--output_dir", type=str, default="images/dataset/generated")
+    p.add_argument("--layout_dir", type=str, default="images/dataset/layouts")
+    p.add_argument("--structure_dir", type=str, default="images/dataset/structure_maps")
     p.add_argument("--height", type=int, default=600)
     p.add_argument("--width", type=int, default=600)
     p.add_argument("--steps", type=int, default=50)
@@ -119,8 +122,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--controlnet_scale", type=float, default=0.8)
     p.add_argument("--lora_scale", type=float, default=0.8)
     p.add_argument("--refine_strength", type=float, default=0.25)
-    p.add_argument("--border_px", type=int, default=8)
+    p.add_argument("--border_px", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--add_defects", action="store_true", help="Add synthetic defects")
+    p.add_argument("--min_defects", type=int, default=4)
+    p.add_argument("--max_defects", type=int, default=6)
+    p.add_argument("--labels_dir", type=str, default="images/dataset/labels")
     return p.parse_args()
 
 
@@ -231,6 +238,28 @@ def main() -> None:
         ).images[0]
         final_pil.save(out_dir / f"layout_{i}_final.png")
         print(f"  [{i}] saved raw / bordered / final")
+
+        # --- Step 6: Add synthetic defects (optional) ---
+        if args.add_defects:
+            labels_dir = _ROOT / args.labels_dir
+            labels_dir.mkdir(parents=True, exist_ok=True)
+
+            final_bgr = cv2.cvtColor(np.array(final_pil), cv2.COLOR_RGB2BGR)
+            n_defects = np.random.default_rng(args.seed + i).integers(
+                args.min_defects, args.max_defects + 1
+            )
+            defected_bgr, annotations = add_defects(
+                image=final_bgr,
+                canvas=canvas,
+                n_defects=n_defects,
+                seed=args.seed + i * 1000,
+            )
+
+            defected_pil = Image.fromarray(cv2.cvtColor(defected_bgr, cv2.COLOR_BGR2RGB))
+            defected_pil.save(out_dir / f"layout_{i}_defected.png")
+
+            save_yolo_labels(annotations, labels_dir / f"layout_{i}_defected.txt")
+            print(f"  [{i}] added {len(annotations)} defects")
 
     print("Done.")
 

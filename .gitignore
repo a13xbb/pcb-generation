@@ -5,3 +5,13 @@ models
 runs
 venv
 structure_generation/train_structure_lora.py
+
+.DS_Store
+CLAUDE.md
+*output
+pcb-defect-dataset
+practice
+*.tar
+trained
+
+docs/
