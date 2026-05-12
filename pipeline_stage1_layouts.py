@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gzip
 import os
 import pickle
 import sys
@@ -122,7 +123,16 @@ def main() -> None:
         print(f"  [{i}] layout ok={ok}  coverage={canvas_coverage(canvas):.3f}"
               f"  pads={len(canvas.pad_instances)}  traces={len(canvas.trace_instances)}")
 
-        with open(out_canvases / f"layout_{i}.pkl", "wb") as f:
+        # Strip asset references and caches to reduce pickle size
+        for pad in canvas.pad_instances:
+            pad.asset = None
+            pad._mask_world_u8 = None
+            pad._attach_center = None
+            pad._attach_boundary = None
+        for trace in canvas.trace_instances:
+            trace.asset = None
+        # gzip compression reduces ~65MB -> ~15MB per file
+        with gzip.open(out_canvases / f"layout_{i}.pkl.gz", "wb") as f:
             pickle.dump(canvas, f)
 
         layout_bgr = cv2.imread(str(layout_path))
