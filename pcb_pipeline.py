@@ -178,15 +178,15 @@ def main() -> None:
 
     for i in tqdm(range(args.n_layouts), desc="Layouts"):
         # --- Step 1: generate layout ---
-        canvas = CanvasState(600, 600, pad_keepout_radius=8)
+        canvas = CanvasState(600, 600, pad_keepout_radius=6)
         ok = generate_layout_motif_based(
             canvas=canvas,
             pad_assets=pad_assets,
             trace_assets=trace_assets,
-            n_cols=5,
-            n_rows=4,
-            edge_padding=10,
-            max_motif_attempts=8,
+            n_cols=6,
+            n_rows=5,
+            edge_padding=8,
+            max_motif_attempts=25,
         )
         layout_path = layout_dir / f"layout_{i}.png"
         visualize_canvas_real(canvas, str(layout_path))

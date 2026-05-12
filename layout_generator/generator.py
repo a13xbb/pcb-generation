@@ -830,45 +830,69 @@ def _place_parallel_chains_in_cell(
     next_pad_id: int,
     next_trace_id: int,
     edge_padding: int = 10,
+    orientation: str = "auto",
 ) -> tuple:
     """
-    Place n_chains H-biased parallel chains spaced exactly _CHAIN_SPACING px apart.
-    A random start y is chosen in the cell so all chains fit; each chain gets a
-    narrow (chain_spacing-tall) sub-cell so start pads are truly close together.
+    Place n_chains parallel chains with configurable orientation.
+    orientation: "H" (horizontal), "V" (vertical), "D" (diagonal), or "auto" (random).
     Per-chain failures roll back that chain only.
     Returns (placed_any, next_pad_id, next_trace_id).
     """
-    _CHAIN_SPACING = 45  # px between parallel chain start y-positions
+    _CHAIN_SPACING = random.choice([20, 25, 30, 35])
 
-    h_traces = [a for _, a in catalog["by_orientation"]["H"]] or trace_assets
+    if orientation == "auto":
+        orientation = random.choice(["H", "V", "D"])
+
+    if orientation == "H":
+        traces = [a for _, a in catalog["by_orientation"]["H"]] or trace_assets
+        angles = (0, 180)
+    elif orientation == "V":
+        traces = [a for _, a in catalog["by_orientation"]["V"]] or trace_assets
+        angles = (90, 270)
+    else:  # diagonal
+        traces = trace_assets
+        angles = (45, 135, 225, 315)
 
     ox, oy = cell.origin
     cw, ch = cell.size
     total_span = (n_chains - 1) * _CHAIN_SPACING
 
-    lo_y = oy
-    hi_y = max(oy + 1.0, oy + ch - total_span)
-    first_y = random.uniform(lo_y, hi_y)
+    if orientation == "V":
+        lo_x = ox
+        hi_x = max(ox + 1.0, ox + cw - total_span)
+        first_pos = random.uniform(lo_x, hi_x)
+    else:
+        lo_y = oy
+        hi_y = max(oy + 1.0, oy + ch - total_span)
+        first_pos = random.uniform(lo_y, hi_y)
 
     placed_any = False
     for i in range(n_chains):
-        chain_y = first_y + i * _CHAIN_SPACING
-        sub_cell = MotifCell(
-            cell_x=cell.cell_x, cell_y=cell.cell_y,
-            origin=(ox, chain_y - _CHAIN_SPACING / 2.0),
-            size=(cw, float(_CHAIN_SPACING)),
-        )
+        if orientation == "V":
+            chain_x = first_pos + i * _CHAIN_SPACING
+            sub_cell = MotifCell(
+                cell_x=cell.cell_x, cell_y=cell.cell_y,
+                origin=(chain_x - _CHAIN_SPACING / 2.0, oy),
+                size=(float(_CHAIN_SPACING), ch),
+            )
+        else:
+            chain_y = first_pos + i * _CHAIN_SPACING
+            sub_cell = MotifCell(
+                cell_x=cell.cell_x, cell_y=cell.cell_y,
+                origin=(ox, chain_y - _CHAIN_SPACING / 2.0),
+                size=(cw, float(_CHAIN_SPACING)),
+            )
 
         snap = _snapshot_canvas(canvas)
         prev_pad_id_i = next_pad_id
         prev_trace_id_i = next_trace_id
 
         ok, next_pad_id, next_trace_id = _place_chain_in_cell(
-            canvas, sub_cell, pad_assets, h_traces, n_segments,
+            canvas, sub_cell, pad_assets, traces, n_segments,
             next_pad_id, next_trace_id, edge_padding,
-            angles=(0, 180),
-            trace_attempts=20,
-            close_attempts=40,
+            angles=angles,
+            trace_attempts=25,
+            close_attempts=50,
         )
         if ok:
             placed_any = True
@@ -940,14 +964,69 @@ def _try_place_isolated_line(
     return [], next_pad_id
 
 
+def _place_pad_grid_in_cell(
+    canvas: CanvasState,
+    cell: MotifCell,
+    pad_assets: list,
+    next_pad_id: int,
+    edge_padding: int = 10,
+) -> tuple:
+    """
+    Place an N×M grid of identical pads in the cell.
+    Returns (success, next_pad_id).
+    """
+    ox, oy = cell.origin
+    cw, ch = cell.size
+
+    n_rows = random.choice([2, 3, 4])
+    n_cols = random.choice([3, 4, 5, 6])
+    row_spacing = random.choice([35, 40, 45, 50])
+    col_spacing = random.choice([35, 40, 45, 50])
+
+    total_w = (n_cols - 1) * col_spacing
+    total_h = (n_rows - 1) * row_spacing
+
+    if total_w > cw - 2 * edge_padding or total_h > ch - 2 * edge_padding:
+        n_cols = max(2, int((cw - 2 * edge_padding) / col_spacing) + 1)
+        n_rows = max(2, int((ch - 2 * edge_padding) / row_spacing) + 1)
+        total_w = (n_cols - 1) * col_spacing
+        total_h = (n_rows - 1) * row_spacing
+
+    start_x = ox + (cw - total_w) / 2.0
+    start_y = oy + (ch - total_h) / 2.0
+
+    pad_asset = random.choice(pad_assets)
+    angle = random.choice([0, 90])
+
+    snap = _snapshot_canvas(canvas)
+    prev_pad_id = next_pad_id
+    placed = []
+
+    for r in range(n_rows):
+        for c in range(n_cols):
+            px = start_x + c * col_spacing
+            py = start_y + r * row_spacing
+            p = place_pad_at_position(canvas, pad_asset, px, py, angle=angle, edge_padding=edge_padding)
+            if p is None:
+                _restore_canvas(canvas, snap)
+                return False, prev_pad_id
+            p.id = next_pad_id
+            p.attached_traces = set()
+            next_pad_id += 1
+            canvas.register_pad(p)
+            placed.append(p)
+
+    return True, next_pad_id
+
+
 def generate_layout_motif_based(
     canvas: CanvasState,
     pad_assets: list,
     trace_assets: list,
-    n_cols: int = 3,
-    n_rows: int = 2,
+    n_cols: int = 6,
+    n_rows: int = 5,
     edge_padding: int = 10,
-    max_motif_attempts: int = 8,
+    max_motif_attempts: int = 25,
     debug_log: bool = False,
 ) -> bool:
     """
@@ -969,8 +1048,8 @@ def generate_layout_motif_based(
     next_trace_id = 0
     placed_motifs = 0
 
-    _STRATEGIES = ['abstract', 'chain', 'parallel_chains']
-    _WEIGHTS    = [0.25,       0.25,   0.50]
+    _STRATEGIES = ['abstract', 'chain', 'parallel_chains', 'grid']
+    _WEIGHTS    = [0.30,       0.15,   0.35,              0.20]
 
     for cell in cells:
         for attempt in range(max_motif_attempts):
@@ -993,18 +1072,31 @@ def generate_layout_motif_based(
                 )
 
             elif strategy == 'chain':
-                n_seg = random.choice([2, 3, 4])
+                n_seg = random.choice([2, 3, 4, 5])
+                chain_angles = random.choice([
+                    (0, 90, 180, 270),           # orthogonal
+                    (0, 45, 90, 135, 180, 225, 270, 315),  # all 45° increments
+                    (45, 135, 225, 315),         # diagonal only
+                ])
                 ok, next_pad_id, next_trace_id = _place_chain_in_cell(
                     canvas, cell, pad_assets, trace_assets, n_seg,
                     next_pad_id, next_trace_id, edge_padding,
+                    angles=chain_angles,
                 )
 
-            else:  # parallel_chains
-                n_chains = random.choice([3, 4, 5])
-                n_seg = random.choice([2, 3])
+            elif strategy == 'parallel_chains':
+                n_chains = random.choice([5, 6, 8, 10])
+                n_seg = random.choice([2, 3, 4])
+                orientation = random.choice(["H", "V", "D"])
                 ok, next_pad_id, next_trace_id = _place_parallel_chains_in_cell(
                     canvas, cell, pad_assets, trace_assets, catalog,
                     n_chains, n_seg, next_pad_id, next_trace_id, edge_padding,
+                    orientation=orientation,
+                )
+
+            else:  # grid
+                ok, next_pad_id = _place_pad_grid_in_cell(
+                    canvas, cell, pad_assets, next_pad_id, edge_padding,
                 )
 
             if ok:
@@ -1016,12 +1108,12 @@ def generate_layout_motif_based(
             next_trace_id = prev_trace_id
 
     # --- Isolated pad groups (organized lines, same shape per group) ---
-    # Target 6-10 isolated pads, placed in aligned 2-5-pad lines.
+    # Target 15-25 isolated pads for denser layouts.
     # All-or-nothing per line: if even one pad collides, we retry a new anchor.
-    n_target = random.randint(6, 10)
+    n_target = random.randint(15, 25)
     total_iso = 0
     groups_attempted = 0
-    max_groups = 8
+    max_groups = 15
 
     while total_iso < n_target and groups_attempted < max_groups:
         groups_attempted += 1
