@@ -86,6 +86,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--output_dir", type=str, default="images/pipeline")
     p.add_argument("--height", type=int, default=600)
     p.add_argument("--width", type=int, default=600)
+    p.add_argument("--start_idx", type=int, default=0)
     return p.parse_args()
 
 
@@ -106,7 +107,7 @@ def main() -> None:
     assert pad_assets and trace_assets, "No assets found in assets/PADS or assets/COPPER_TRACES"
     print(f"  {len(pad_assets)} pads, {len(trace_assets)} traces")
 
-    for i in tqdm(range(args.n_layouts), desc="Layouts"):
+    for i in tqdm(range(args.start_idx, args.n_layouts), desc="Layouts"):
         canvas = CanvasState(args.width, args.height, pad_keepout_radius=6)
         ok = generate_layout_motif_based(
             canvas=canvas,
