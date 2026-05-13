@@ -11,6 +11,8 @@ class MotifType(Enum):
     TRACE_BUS      = "trace_bus"
     TRACE_CHAIN    = "trace_chain"     # single grow-forward multi-segment path
     PARALLEL_CHAINS = "parallel_chains"  # 2-3 side-by-side H-biased chains
+    PAD_GRID       = "pad_grid"        # N×M regular pad array (IC, via field)
+    DENSE_BUS      = "dense_bus"       # 8-16 tightly spaced parallel traces
 
 
 @dataclass
@@ -101,6 +103,50 @@ def make_pad_pair(pad_a_pos: Tuple[float, float], direction_angle: int, trace_le
     return AbstractMotif(MotifType.PAD_PAIR, pads, traces, (x1, y1, x2, y2))
 
 
+def make_pad_grid(origin: Tuple[float, float], n_rows: int, n_cols: int,
+                  row_spacing: float, col_spacing: float) -> AbstractMotif:
+    """N×M regular pad grid (IC pin array, via field, connector)."""
+    ox, oy = origin
+    pads = []
+    for r in range(n_rows):
+        for c in range(n_cols):
+            pad_id = r * n_cols + c
+            pads.append(AbstractPad(pad_id=pad_id, pos=(ox + c * col_spacing, oy + r * row_spacing)))
+    x1 = ox - 20
+    y1 = oy - 20
+    x2 = ox + (n_cols - 1) * col_spacing + 20
+    y2 = oy + (n_rows - 1) * row_spacing + 20
+    return AbstractMotif(MotifType.PAD_GRID, pads, [], (x1, y1, x2, y2))
+
+
+def make_dense_bus(origin: Tuple[float, float], n_traces: int, trace_length: float,
+                   spacing: float = 20, orientation: int = 0) -> AbstractMotif:
+    """Dense parallel trace bus (8-16 traces at tight spacing)."""
+    ox, oy = origin
+    pads = []
+    traces = []
+    for i in range(n_traces):
+        if orientation == 0:  # horizontal bus
+            ax, ay = ox, oy + i * spacing
+            bx, by = ox + trace_length, oy + i * spacing
+        else:  # vertical bus
+            ax, ay = ox + i * spacing, oy
+            bx, by = ox + i * spacing, oy + trace_length
+        pad_id_a = 2 * i
+        pad_id_b = 2 * i + 1
+        pads.append(AbstractPad(pad_id=pad_id_a, pos=(ax, ay)))
+        pads.append(AbstractPad(pad_id=pad_id_b, pos=(bx, by)))
+        traces.append(AbstractTrace(
+            trace_id=i, pad_id_a=pad_id_a, pad_id_b=pad_id_b,
+            required_length=trace_length, required_angle=orientation,
+        ))
+    if orientation == 0:
+        bb = (ox - 20, oy - 20, ox + trace_length + 20, oy + (n_traces - 1) * spacing + 20)
+    else:
+        bb = (ox - 20, oy - 20, ox + (n_traces - 1) * spacing + 20, oy + trace_length + 20)
+    return AbstractMotif(MotifType.DENSE_BUS, pads, traces, bb)
+
+
 def make_trace_bus(origin: Tuple[float, float], k_traces: int, trace_length: float,
                    bus_spacing: float, orientation: int = 0) -> AbstractMotif:
     """K parallel traces with a pad at each end (routing bus pattern)."""
@@ -169,11 +215,17 @@ def generate_abstract_motif_for_cell(cell: MotifCell,
     cx = ox + cw / 2.0
     cy = oy + ch / 2.0
 
-    # Build weighted list of feasible motif types (all require traces — no PAD_ROW).
+    # Build weighted list of feasible motif types
+    motif_types: List[MotifType] = [
+        MotifType.DUAL_ROW, MotifType.PAD_PAIR, MotifType.TRACE_BUS,
+        MotifType.PAD_GRID, MotifType.DENSE_BUS
+    ]
+    weights: List[float] = [0.20, 0.15, 0.15, 0.25, 0.25]
+
+    # PAD_GRID doesn't need traces; others do
     if not available_h_lengths:
-        return None
-    motif_types: List[MotifType] = [MotifType.DUAL_ROW, MotifType.PAD_PAIR, MotifType.TRACE_BUS]
-    weights: List[float] = [0.40, 0.35, 0.25]
+        motif_types = [MotifType.PAD_GRID]
+        weights = [1.0]
 
     r = random.random()
     cumulative = 0.0
@@ -214,17 +266,61 @@ def generate_abstract_motif_for_cell(cell: MotifCell,
 
     # ---- TRACE_BUS ----
     if chosen == MotifType.TRACE_BUS:
-        k = random.choice([3, 4])
-        tlen = _pick_length(available_h_lengths, (100, 150))
+        k = random.choice([4, 5, 6])
+        orientation = random.choice([0, 0, 90]) if available_v_lengths else 0
+        lengths = available_h_lengths if orientation == 0 else available_v_lengths
+        tlen = _pick_length(lengths, (100, 150))
         if tlen is None:
-            tlen = _pick_length(available_h_lengths, (60, 200))
+            tlen = _pick_length(lengths, (60, 200))
         if tlen is None:
             return None
-        bus_spacing = 35
-        total_h = (k - 1) * bus_spacing
-        return make_trace_bus(
-            origin=(cx - tlen / 2.0, cy - total_h / 2.0),
-            k_traces=k, trace_length=tlen, bus_spacing=bus_spacing, orientation=0,
+        bus_spacing = random.choice([25, 30, 35])
+        total_span = (k - 1) * bus_spacing
+        if orientation == 0:
+            return make_trace_bus(
+                origin=(cx - tlen / 2.0, cy - total_span / 2.0),
+                k_traces=k, trace_length=tlen, bus_spacing=bus_spacing, orientation=0,
+            )
+        else:
+            return make_trace_bus(
+                origin=(cx - total_span / 2.0, cy - tlen / 2.0),
+                k_traces=k, trace_length=tlen, bus_spacing=bus_spacing, orientation=90,
+            )
+
+    # ---- PAD_GRID ----
+    if chosen == MotifType.PAD_GRID:
+        n_rows = random.choice([2, 3, 4])
+        n_cols = random.choice([3, 4, 5, 6])
+        row_spacing = random.choice([40, 45, 50, 55])
+        col_spacing = random.choice([40, 45, 50, 55])
+        total_w = (n_cols - 1) * col_spacing
+        total_h = (n_rows - 1) * row_spacing
+        return make_pad_grid(
+            origin=(cx - total_w / 2.0, cy - total_h / 2.0),
+            n_rows=n_rows, n_cols=n_cols,
+            row_spacing=row_spacing, col_spacing=col_spacing,
         )
+
+    # ---- DENSE_BUS ----
+    if chosen == MotifType.DENSE_BUS:
+        n_traces = random.choice([8, 10, 12, 14])
+        tlen = _pick_length(available_h_lengths, (80, 150))
+        if tlen is None:
+            tlen = _pick_length(available_h_lengths, (50, 200))
+        if tlen is None:
+            return None
+        spacing = random.choice([18, 20, 22, 25])
+        orientation = random.choice([0, 90]) if available_v_lengths else 0
+        total_span = (n_traces - 1) * spacing
+        if orientation == 0:
+            return make_dense_bus(
+                origin=(cx - tlen / 2.0, cy - total_span / 2.0),
+                n_traces=n_traces, trace_length=tlen, spacing=spacing, orientation=0,
+            )
+        else:
+            return make_dense_bus(
+                origin=(cx - total_span / 2.0, cy - tlen / 2.0),
+                n_traces=n_traces, trace_length=tlen, spacing=spacing, orientation=90,
+            )
 
     return None

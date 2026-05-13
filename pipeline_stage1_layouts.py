@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gzip
 import os
 import pickle
 import sys
@@ -85,6 +86,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--output_dir", type=str, default="images/pipeline")
     p.add_argument("--height", type=int, default=600)
     p.add_argument("--width", type=int, default=600)
+    p.add_argument("--start_idx", type=int, default=0)
     return p.parse_args()
 
 
@@ -105,16 +107,16 @@ def main() -> None:
     assert pad_assets and trace_assets, "No assets found in assets/PADS or assets/COPPER_TRACES"
     print(f"  {len(pad_assets)} pads, {len(trace_assets)} traces")
 
-    for i in tqdm(range(args.n_layouts), desc="Layouts"):
-        canvas = CanvasState(600, 600, pad_keepout_radius=8)
+    for i in tqdm(range(args.start_idx, args.n_layouts), desc="Layouts"):
+        canvas = CanvasState(args.width, args.height, pad_keepout_radius=6)
         ok = generate_layout_motif_based(
             canvas=canvas,
             pad_assets=pad_assets,
             trace_assets=trace_assets,
-            n_cols=5,
-            n_rows=4,
-            edge_padding=10,
-            max_motif_attempts=8,
+            n_cols=6,
+            n_rows=5,
+            edge_padding=8,
+            max_motif_attempts=25,
         )
 
         layout_path = out_layouts / f"layout_{i}.png"
@@ -122,7 +124,16 @@ def main() -> None:
         print(f"  [{i}] layout ok={ok}  coverage={canvas_coverage(canvas):.3f}"
               f"  pads={len(canvas.pad_instances)}  traces={len(canvas.trace_instances)}")
 
-        with open(out_canvases / f"layout_{i}.pkl", "wb") as f:
+        # Strip asset references and caches to reduce pickle size
+        for pad in canvas.pad_instances:
+            pad.asset = None
+            pad._mask_world_u8 = None
+            pad._attach_center = None
+            pad._attach_boundary = None
+        for trace in canvas.trace_instances:
+            trace.asset = None
+        # gzip compression reduces ~65MB -> ~15MB per file
+        with gzip.open(out_canvases / f"layout_{i}.pkl.gz", "wb") as f:
             pickle.dump(canvas, f)
 
         layout_bgr = cv2.imread(str(layout_path))

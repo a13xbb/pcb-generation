@@ -2,8 +2,8 @@
 """Stage 3: add synthetic defects to pre-generated PCB images.
 
 Reads from --input_dir:
-  images/layout_N.png   — final PCB image (from stage 2)
-  canvases/layout_N.pkl — canvas for defect placement (from stage 1)
+  images/layout_N.png      — final PCB image (from stage 2)
+  canvases/layout_N.pkl.gz — canvas for defect placement (from stage 1)
 
 Writes to --output_dir:
   defects/images/layout_N_rep{R}.png  — image with defects
@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gzip
 import pickle
 import re
 import sys
@@ -72,14 +73,14 @@ def main() -> None:
 
     skipped = 0
     for i, image_path in tqdm(image_entries, desc="Defects"):
-        canvas_path = in_dir / "canvases" / f"layout_{i}.pkl"
+        canvas_path = in_dir / "canvases" / f"layout_{i}.pkl.gz"
         if not canvas_path.exists():
             print(f"  [{i}] WARNING: canvas not found at {canvas_path}, skipping")
             skipped += 1
             continue
 
         try:
-            with open(canvas_path, "rb") as f:
+            with gzip.open(canvas_path, "rb") as f:
                 canvas = pickle.load(f)
         except Exception as e:
             print(f"  [{i}] WARNING: failed to load canvas ({e}), skipping")

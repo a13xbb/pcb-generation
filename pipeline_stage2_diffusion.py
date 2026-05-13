@@ -3,7 +3,7 @@
 
 Reads from --input_dir:
   structure_maps/layout_N.png — Canny edge map (from stage 1)
-  canvases/layout_N.pkl       — canvas for border application (from stage 1)
+  canvases/layout_N.pkl.gz    — canvas for border application (from stage 1)
 
 Writes to --output_dir:
   images/layout_N.png         — final refined PCB image
@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gzip
 import os
 import pickle
 import re
@@ -137,14 +138,14 @@ def main() -> None:
 
     skipped = 0
     for i, structure_path in tqdm(structure_entries, desc="Diffusion"):
-        canvas_path = in_dir / "canvases" / f"layout_{i}.pkl"
+        canvas_path = in_dir / "canvases" / f"layout_{i}.pkl.gz"
         if not canvas_path.exists():
             print(f"  [{i}] WARNING: canvas not found at {canvas_path}, skipping")
             skipped += 1
             continue
 
         try:
-            with open(canvas_path, "rb") as f:
+            with gzip.open(canvas_path, "rb") as f:
                 canvas = pickle.load(f)
         except Exception as e:
             print(f"  [{i}] WARNING: failed to load canvas ({e}), skipping")
