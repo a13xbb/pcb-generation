@@ -74,19 +74,25 @@ def generate_spurious_copper(
     trace_pixels = image[mask_resized > 0]
 
     if len(trace_pixels) > 0:
-        trace_color = tuple(np.median(trace_pixels, axis=0).astype(int).tolist())
+        median_color = np.median(trace_pixels, axis=0).astype(int)
+        # Boost green, reduce blue/red for richer green
+        b, g, r = median_color
+        b = int(b * 0.85)
+        g = int(min(255, g * 1.05))
+        r = int(r * 0.85)
+        trace_color = (b, g, r)
     else:
-        trace_color = (56, 136, 37)  # fallback BGR green
+        trace_color = (45, 140, 30)  # fallback BGR green
 
     trace_color = add_noise_to_color(trace_color, sigma=1.5, rng=rng)
 
     h, w = image.shape[:2]
     mask_h, mask_w = canvas.occupied_mask.shape
 
-    # Shape dimensions: long side 1.5–5× the short side
+    # Shape dimensions: long side 3–7× the short side (line-like)
     long_side = rng.integers(min_w, max_w + 1)
-    ratio = rng.uniform(1.5, 5.0)
-    short_side = max(6, int(long_side / ratio))
+    ratio = rng.uniform(3.0, 7.0)
+    short_side = max(4, min(12, int(long_side / ratio)))
     rw, rh = long_side, short_side
     half_diag = int(np.sqrt(rw ** 2 + rh ** 2) / 2) + 2
 
