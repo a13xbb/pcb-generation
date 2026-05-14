@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gzip
 import pickle
 import sys
 from pathlib import Path
@@ -130,9 +131,10 @@ def main() -> None:
         sys.exit(1)
     print(f"Loaded image {image_bgr.shape[1]}×{image_bgr.shape[0]} from {image_path}")
 
-    # Load canvas
+    # Load canvas (supports both .pkl and .pkl.gz)
     sys.path.insert(0, str(_ROOT / "layout_generator"))
-    with open(canvas_path, "rb") as f:
+    opener = gzip.open if canvas_path.suffix == ".gz" else open
+    with opener(canvas_path, "rb") as f:
         canvas = pickle.load(f)
     print(f"Loaded canvas: {len(canvas.pad_instances)} pads, {len(canvas.trace_instances)} traces")
 

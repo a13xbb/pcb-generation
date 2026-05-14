@@ -56,31 +56,36 @@ def generate_spurious_copper(
     image: np.ndarray,
     canvas: "CanvasState",
     rng: np.random.Generator,
-    min_w: int = 15,
-    max_w: int = 45,
+    min_w: int = 10,
+    max_w: int = 80,
     clearance: int = 12,
 ) -> DefectResult:
     traces = canvas.trace_instances
     if not traces:
         return DefectResult(success=False)
 
-    # Sample midtone color from all traces combined for a stable, consistent green
+    # Sample trace color - use median for stable, typical trace color
     combined_trace_mask = np.zeros_like(canvas.occupied_mask)
     for t in traces:
         combined_trace_mask = np.maximum(combined_trace_mask, t.mask_world)
-    base_color = sample_midtone_trace_color(image, combined_trace_mask)
 
-    # Optionally darken slightly (80–100% brightness)
-    darkness = rng.uniform(0.80, 1.0)
-    trace_color = tuple(int(c * darkness) for c in base_color)
-    trace_color = add_noise_to_color(trace_color, sigma=3.0, rng=rng)
+    h, w = image.shape[:2]
+    mask_resized = cv2.resize(combined_trace_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+    trace_pixels = image[mask_resized > 0]
+
+    if len(trace_pixels) > 0:
+        trace_color = tuple(np.median(trace_pixels, axis=0).astype(int).tolist())
+    else:
+        trace_color = (56, 136, 37)  # fallback BGR green
+
+    trace_color = add_noise_to_color(trace_color, sigma=1.5, rng=rng)
 
     h, w = image.shape[:2]
     mask_h, mask_w = canvas.occupied_mask.shape
 
-    # Shape dimensions: long side 2–4× the short side
+    # Shape dimensions: long side 1.5–5× the short side
     long_side = rng.integers(min_w, max_w + 1)
-    ratio = rng.uniform(2.0, 4.0)
+    ratio = rng.uniform(1.5, 5.0)
     short_side = max(6, int(long_side / ratio))
     rw, rh = long_side, short_side
     half_diag = int(np.sqrt(rw ** 2 + rh ** 2) / 2) + 2
@@ -125,7 +130,7 @@ def generate_spurious_copper(
         return DefectResult(success=False)
 
     # Textured fill
-    noise = rng.normal(0, 5.0, (h, w, 3))
+    noise = rng.normal(0, 3.0, (h, w, 3))
     textured = np.clip(np.array(trace_color) + noise, 0, 255).astype(np.uint8)
     image[shape_mask > 0] = textured[shape_mask > 0]
 
