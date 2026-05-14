@@ -17,6 +17,16 @@ CLASS_NAMES = {
 
 CLASS_IDS = {v: k for k, v in CLASS_NAMES.items()}
 
+# Bbox padding to match real-dataset annotation style (real annotators add margin).
+# Values: (width_pad, height_pad) per side, derived from (real_median - synth_median) / 2
+CLASS_BBOX_PAD = {
+    0: (0.0134, 0.0192),  # mouse_bite
+    1: (0.0158, 0.0142),  # spur
+    2: (0.0092, 0.0100),  # missing_hole
+    3: (0.0075, 0.0067),  # open_circuit
+    4: (0.0075, 0.0067),  # spurious_copper
+}
+
 
 @dataclass
 class DefectAnnotation:
@@ -29,6 +39,15 @@ class DefectAnnotation:
 
     def to_yolo_line(self) -> str:
         return f"{self.class_id} {self.center_x:.4f} {self.center_y:.4f} {self.width:.4f} {self.height:.4f}"
+
+    def padded(self) -> "DefectAnnotation":
+        """Return a copy with bbox expanded to match real-dataset annotation style."""
+        pw, ph = CLASS_BBOX_PAD.get(self.class_id, (0.0, 0.0))
+        new_w = min(self.width + 2 * pw, 1.0)
+        new_h = min(self.height + 2 * ph, 1.0)
+        new_cx = max(new_w / 2, min(self.center_x, 1.0 - new_w / 2))
+        new_cy = max(new_h / 2, min(self.center_y, 1.0 - new_h / 2))
+        return DefectAnnotation(self.class_id, new_cx, new_cy, new_w, new_h, self.metadata.copy())
 
     @staticmethod
     def from_pixel_bbox(

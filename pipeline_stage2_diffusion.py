@@ -36,8 +36,8 @@ _ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "layout_generator"))  # required for unpickling CanvasState
 
-import env  # noqa: E402
-os.environ["HF_HOME"] = env.HF_HOME
+# import env  # noqa: E402
+# os.environ["HF_HOME"] = env.HF_HOME
 
 import cv2
 import numpy as np
@@ -143,10 +143,14 @@ def main() -> None:
                 module.scaling[key] = args.lora_scale
     pipe.unet.eval()
 
-    pipe.vae = pipe.vae.to(dtype=torch.float32)
+    pipe.to(device)
+    pipe.vae.to(dtype=torch.float32)
 
-    if device.type != "mps":
-        pipe.enable_model_cpu_offload()
+    _original_decode = pipe.vae.decode
+    def _decode_fp32(latents, **kwargs):
+        return _original_decode(latents.to(torch.float32), **kwargs)
+    pipe.vae.decode = _decode_fp32
+
     pipe.enable_vae_slicing()
     pipe.enable_attention_slicing()
 
