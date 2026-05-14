@@ -84,10 +84,12 @@ def add_defects(
 def save_yolo_labels(
     annotations: List[DefectAnnotation],
     output_path: str | Path,
+    pad_bboxes: bool = True,
 ) -> None:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, "w") as f:
         for ann in annotations:
-            f.write(ann.to_yolo_line() + "\n")
+            out_ann = ann.padded() if pad_bboxes else ann
+            f.write(out_ann.to_yolo_line() + "\n")

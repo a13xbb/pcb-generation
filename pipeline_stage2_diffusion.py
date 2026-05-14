@@ -6,11 +6,21 @@ Reads from --input_dir:
   canvases/layout_N.pkl.gz    — canvas for border application (from stage 1)
 
 Writes to --output_dir:
-  images/layout_N.png         — final refined PCB image
+  images/layout_N.png         — final refined PCB image (default)
+
+  With --verbose:
+    images/layout_N_raw.png      — after ControlNet generation
+    images/layout_N_bordered.png — after border painting (unless --skip_borders)
+    images/layout_N_final.png    — after img2img refinement
+
+  With --skip_borders:
+    Skips border painting, refines directly from raw ControlNet output.
+    Useful for light denoising with low --refine_strength (e.g., 0.2).
+    Refinement uses ControlNet to maintain structural fidelity.
 
 Usage:
   python pipeline_stage2_diffusion.py \\
-      --input_dir images/run1 --output_dir images/run1
+      --input_dir images/run1 --output_dir images/run1 --verbose
 """
 from __future__ import annotations
 
@@ -42,10 +52,9 @@ from PIL import Image
 from tqdm import tqdm
 
 PROMPT = (
-    "macro photo of printed circuit board, green solder mask, "
-    "realistic, photorealistic"
+    "macro photo of printed circuit board, green solder mask, realistic, photorealistic"
 )
-NEGATIVE_PROMPT = "blurry, low quality, defects, damage, cracks, burned"
+NEGATIVE_PROMPT = "blurry, low quality, defects, damage, cracks, burned, cartoon, illustration, 3d render, flat colors, oversaturated, distorted"
 
 
 def _apply_borders(img_bgr: np.ndarray, occupied_mask: np.ndarray, border_px: int) -> np.ndarray:
@@ -78,12 +87,18 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--height", type=int, default=600)
     p.add_argument("--width", type=int, default=600)
     p.add_argument("--steps", type=int, default=50)
-    p.add_argument("--guidance_scale", type=float, default=8.0)
-    p.add_argument("--controlnet_scale", type=float, default=0.8)
+    p.add_argument("--guidance_scale", type=float, default=6.0)
+    p.add_argument("--controlnet_scale", type=float, default=0.85)
     p.add_argument("--lora_scale", type=float, default=0.8)
-    p.add_argument("--refine_strength", type=float, default=0.25)
+    p.add_argument("--refine_strength", type=float, default=0.3)
+    p.add_argument("--refine_controlnet_scale", type=float, default=0.6,
+                   help="ControlNet scale for refinement (lower = more smoothing freedom)")
     p.add_argument("--border_px", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--verbose", action="store_true",
+                   help="Save intermediate images: raw, bordered, and final")
+    p.add_argument("--skip_borders", action="store_true",
+                   help="Skip border painting, refine directly from raw output")
     return p.parse_args()
 
 
@@ -128,12 +143,18 @@ def main() -> None:
                 module.scaling[key] = args.lora_scale
     pipe.unet.eval()
 
-    if device.type != "mps":
-        pipe.enable_model_cpu_offload()
+    pipe.to(device)
+    pipe.vae.to(dtype=torch.float32)
+
+    _original_decode = pipe.vae.decode
+    def _decode_fp32(latents, **kwargs):
+        return _original_decode(latents.to(torch.float32), **kwargs)
+    pipe.vae.decode = _decode_fp32
+
     pipe.enable_vae_slicing()
     pipe.enable_attention_slicing()
 
-    print("Building img2img refinement pipeline...")
+    print("Building img2img refinement pipeline (with ControlNet)...")
     pipe_i2i = StableDiffusionXLControlNetImg2ImgPipeline(**pipe.components)
 
     skipped = 0
@@ -153,7 +174,8 @@ def main() -> None:
             continue
 
         structure_np = cv2.imread(str(structure_path), cv2.IMREAD_GRAYSCALE)
-        structure_pil = Image.fromarray(cv2.resize(structure_np, (args.width, args.height)))
+        resized_np = cv2.resize(structure_np, (args.width, args.height))
+        structure_pil = Image.fromarray(np.stack([resized_np, resized_np, resized_np], axis=-1))
 
         gen = torch.Generator(device=gen_device).manual_seed(args.seed + i)
         raw_pil = pipe(
@@ -168,23 +190,35 @@ def main() -> None:
             generator=gen,
         ).images[0]
 
-        raw_bgr = cv2.cvtColor(np.array(raw_pil), cv2.COLOR_RGB2BGR)
-        bordered_bgr = _apply_borders(raw_bgr, canvas.occupied_mask, args.border_px)
-        bordered_pil = Image.fromarray(cv2.cvtColor(bordered_bgr, cv2.COLOR_BGR2RGB))
+        if args.verbose:
+            raw_pil.save(out_images / f"layout_{i}_raw.png")
 
-        gen2 = torch.Generator(device=gen_device).manual_seed(args.seed + i)
+        if args.skip_borders:
+            refine_input = raw_pil
+        else:
+            raw_bgr = cv2.cvtColor(np.array(raw_pil), cv2.COLOR_RGB2BGR)
+            bordered_bgr = _apply_borders(raw_bgr, canvas.occupied_mask, args.border_px)
+            refine_input = Image.fromarray(cv2.cvtColor(bordered_bgr, cv2.COLOR_BGR2RGB))
+            if args.verbose:
+                refine_input.save(out_images / f"layout_{i}_bordered.png")
+
+        gen2 = torch.Generator(device=gen_device).manual_seed(args.seed + i + 10000)
         final_pil = pipe_i2i(
             prompt=PROMPT,
             negative_prompt=NEGATIVE_PROMPT,
-            image=bordered_pil,
+            image=refine_input,
             control_image=structure_pil,
             strength=args.refine_strength,
             num_inference_steps=args.steps,
             guidance_scale=args.guidance_scale,
-            controlnet_conditioning_scale=args.controlnet_scale,
+            controlnet_conditioning_scale=args.refine_controlnet_scale,
             generator=gen2,
         ).images[0]
-        final_pil.save(out_images / f"layout_{i}.png")
+
+        if args.verbose:
+            final_pil.save(out_images / f"layout_{i}_final.png")
+        else:
+            final_pil.save(out_images / f"layout_{i}.png")
 
     total = len(structure_entries)
     print(f"\nDone. Processed {total - skipped}/{total} layouts. Images saved to: {out_images}")
