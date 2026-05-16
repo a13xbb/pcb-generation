@@ -37,7 +37,7 @@ def parse_args():
                    help="Path to dataset data.yaml")
     p.add_argument("--epochs", type=int, default=150)
     p.add_argument("--imgsz", type=int, default=640)
-    p.add_argument("--batch", type=int, default=8)
+    p.add_argument("--batch", type=int, default=16)
     p.add_argument("--workers", type=int, default=0)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--binarize_p", type=float, default=0.25,
@@ -48,6 +48,8 @@ def parse_args():
                    help="Minimum crop scale (zoom-in)")
     p.add_argument("--crop_scale_max", type=float, default=0.7,
                    help="Maximum crop scale (zoom-in)")
+    p.add_argument("--aug_mult", type=int, default=3,
+                   help="Augmentation multiplier per image")
     p.add_argument("--name", default="grayscale_synth",
                    help="Run name")
     p.add_argument("--preprocess", action="store_true",
@@ -120,6 +122,88 @@ def preprocess_dataset_to_grayscale(data_yaml: Path, augmentor: GrayscaleAugment
     return new_data_yaml
 
 
+def process_split(
+    src_images_dir: Path,
+    src_labels_dir: Path,
+    dst_images_dir: Path,
+    dst_labels_dir: Path,
+    binarize_prob: float,
+    crop_prob: float,
+    crop_scale_range: tuple,
+    augment_multiplier: int,
+    apply_augmentation: bool = True
+) -> tuple:
+    """Process a single split (train or val)."""
+    from augmentations import to_grayscale, binarize_synth, random_crop_zoom
+
+    dst_images_dir.mkdir(parents=True, exist_ok=True)
+    dst_labels_dir.mkdir(parents=True, exist_ok=True)
+
+    img_count = 0
+    aug_count = 0
+
+    for img_path in sorted(src_images_dir.glob("*")):
+        if img_path.suffix.lower() not in [".jpg", ".jpeg", ".png"]:
+            continue
+
+        img = cv2.imread(str(img_path))
+        if img is None:
+            continue
+
+        # Load labels
+        label_path = src_labels_dir / (img_path.stem + ".txt")
+        labels = []
+        if label_path.exists():
+            with open(label_path) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 5:
+                        labels.append([float(x) for x in parts[:5]])
+        labels = np.array(labels) if labels else np.array([])
+
+        # 1. Always save grayscale version
+        gray_img = to_grayscale(img)
+        dst_path = dst_images_dir / f"{img_path.stem}_gray.jpg"
+        cv2.imwrite(str(dst_path), gray_img)
+        if len(labels) > 0:
+            with open(dst_labels_dir / f"{img_path.stem}_gray.txt", "w") as f:
+                for lbl in labels:
+                    f.write(f"{int(lbl[0])} {lbl[1]:.6f} {lbl[2]:.6f} {lbl[3]:.6f} {lbl[4]:.6f}\n")
+        img_count += 1
+
+        # 2. Generate augmented versions (only for training, not validation)
+        if apply_augmentation:
+            for aug_idx in range(augment_multiplier):
+                aug_img = img.copy()
+                aug_labels = labels.copy() if len(labels) > 0 else np.array([])
+                suffix = f"_aug{aug_idx}"
+
+                # Random crop
+                if np.random.random() < crop_prob and len(aug_labels) > 0:
+                    aug_img, aug_labels = random_crop_zoom(aug_img, aug_labels, crop_scale_range)
+                    suffix += "_crop"
+
+                # Binarize or grayscale
+                if np.random.random() < binarize_prob:
+                    aug_img = binarize_synth(aug_img)
+                    suffix += "_bin"
+                else:
+                    aug_img = to_grayscale(aug_img)
+
+                # Save augmented version
+                dst_path = dst_images_dir / f"{img_path.stem}{suffix}.jpg"
+                cv2.imwrite(str(dst_path), aug_img)
+
+                if len(aug_labels) > 0:
+                    with open(dst_labels_dir / f"{img_path.stem}{suffix}.txt", "w") as f:
+                        for lbl in aug_labels:
+                            f.write(f"{int(lbl[0])} {lbl[1]:.6f} {lbl[2]:.6f} {lbl[3]:.6f} {lbl[4]:.6f}\n")
+
+                aug_count += 1
+
+    return img_count, aug_count
+
+
 def create_augmented_dataset(
     data_yaml: Path,
     binarize_prob: float = 0.25,
@@ -129,14 +213,13 @@ def create_augmented_dataset(
 ) -> Path:
     """Create augmented grayscale dataset with binarization and crop.
 
-    For each original image, creates:
+    For each training image, creates:
     - 1 grayscale version (always)
     - Additional augmented versions based on multiplier
 
-    This pre-generates augmented samples so YOLO trains on them directly.
+    Validation images are only converted to grayscale (no augmentation).
     """
     import yaml
-    from augmentations import to_grayscale, binarize_synth, random_crop_zoom
 
     with open(data_yaml) as f:
         data_config = yaml.safe_load(f)
@@ -149,91 +232,68 @@ def create_augmented_dataset(
     print(f"  Crop prob: {crop_prob}")
     print(f"  Augment multiplier: {augment_multiplier}")
 
-    # Get image and label directories
-    images_dir = src_path / data_config.get("train", "images")
-    labels_dir = src_path / "labels"
+    # Determine dataset structure
+    train_split = data_config.get("train", "images")
+    val_split = data_config.get("val", train_split)
 
-    dst_images = temp_dir / "images"
-    dst_labels = temp_dir / "labels"
-    dst_images.mkdir(parents=True, exist_ok=True)
-    dst_labels.mkdir(parents=True, exist_ok=True)
+    # Check if it's a flat structure (images/) or split structure (images/train/, images/val/)
+    train_images_dir = src_path / train_split
+    if not train_images_dir.exists():
+        train_images_dir = src_path / "images" / train_split
 
-    img_count = 0
-    aug_count = 0
+    val_images_dir = src_path / val_split
+    if not val_images_dir.exists():
+        val_images_dir = src_path / "images" / val_split
 
-    for img_path in sorted(images_dir.glob("*")):
-        if img_path.suffix.lower() not in [".jpg", ".jpeg", ".png"]:
-            continue
+    # Labels directory - check common structures
+    if (src_path / "labels" / "train").exists():
+        train_labels_dir = src_path / "labels" / "train"
+        val_labels_dir = src_path / "labels" / "val"
+    elif (src_path / "train" / "labels").exists():
+        train_labels_dir = src_path / "train" / "labels"
+        val_labels_dir = src_path / "val" / "labels"
+    else:
+        train_labels_dir = src_path / "labels"
+        val_labels_dir = src_path / "labels"
 
-        img = cv2.imread(str(img_path))
-        if img is None:
-            continue
+    print(f"  Train images: {train_images_dir}")
+    print(f"  Train labels: {train_labels_dir}")
+    print(f"  Val images: {val_images_dir}")
+    print(f"  Val labels: {val_labels_dir}")
 
-        # Load labels
-        label_path = labels_dir / (img_path.stem + ".txt")
-        labels = []
-        if label_path.exists():
-            with open(label_path) as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) >= 5:
-                        labels.append([float(x) for x in parts[:5]])
-        labels = np.array(labels) if labels else np.array([])
+    # Process training set (with augmentation)
+    print("\nProcessing training set...")
+    train_img_count, train_aug_count = process_split(
+        train_images_dir, train_labels_dir,
+        temp_dir / "images" / "train", temp_dir / "labels" / "train",
+        binarize_prob, crop_prob, crop_scale_range, augment_multiplier,
+        apply_augmentation=True
+    )
+    print(f"  Train: {train_img_count} grayscale + {train_aug_count} augmented = {train_img_count + train_aug_count} total")
 
-        # 1. Always save grayscale version
-        gray_img = to_grayscale(img)
-        dst_path = dst_images / f"{img_path.stem}_gray.jpg"
-        cv2.imwrite(str(dst_path), gray_img)
-        if len(labels) > 0:
-            with open(dst_labels / f"{img_path.stem}_gray.txt", "w") as f:
-                for lbl in labels:
-                    f.write(f"{int(lbl[0])} {lbl[1]:.6f} {lbl[2]:.6f} {lbl[3]:.6f} {lbl[4]:.6f}\n")
-        img_count += 1
-
-        # 2. Generate augmented versions
-        for aug_idx in range(augment_multiplier):
-            aug_img = img.copy()
-            aug_labels = labels.copy() if len(labels) > 0 else np.array([])
-            suffix = f"_aug{aug_idx}"
-
-            # Random crop
-            if np.random.random() < crop_prob and len(aug_labels) > 0:
-                aug_img, aug_labels = random_crop_zoom(aug_img, aug_labels, crop_scale_range)
-                suffix += "_crop"
-
-            # Binarize or grayscale
-            if np.random.random() < binarize_prob:
-                aug_img = binarize_synth(aug_img)
-                suffix += "_bin"
-            else:
-                aug_img = to_grayscale(aug_img)
-
-            # Save augmented version
-            dst_path = dst_images / f"{img_path.stem}{suffix}.jpg"
-            cv2.imwrite(str(dst_path), aug_img)
-
-            if len(aug_labels) > 0:
-                with open(dst_labels / f"{img_path.stem}{suffix}.txt", "w") as f:
-                    for lbl in aug_labels:
-                        f.write(f"{int(lbl[0])} {lbl[1]:.6f} {lbl[2]:.6f} {lbl[3]:.6f} {lbl[4]:.6f}\n")
-
-            aug_count += 1
-
-    print(f"Created {img_count} grayscale + {aug_count} augmented images")
-    print(f"Total training images: {img_count + aug_count}")
+    # Process validation set (grayscale only, no augmentation)
+    print("\nProcessing validation set...")
+    val_img_count, _ = process_split(
+        val_images_dir, val_labels_dir,
+        temp_dir / "images" / "val", temp_dir / "labels" / "val",
+        binarize_prob, crop_prob, crop_scale_range, augment_multiplier,
+        apply_augmentation=False  # No augmentation for validation
+    )
+    print(f"  Val: {val_img_count} grayscale images")
 
     # Create data.yaml
     new_data_yaml = temp_dir / "data.yaml"
     new_config = {
         "path": str(temp_dir),
-        "train": "images",
-        "val": "images",
+        "train": "images/train",
+        "val": "images/val",
         "names": data_config["names"]
     }
 
     with open(new_data_yaml, "w") as f:
         yaml.dump(new_config, f)
 
+    print(f"\nDataset ready: {new_data_yaml}")
     return new_data_yaml
 
 
@@ -256,7 +316,7 @@ def main():
         binarize_prob=args.binarize_p,
         crop_prob=args.crop_p,
         crop_scale_range=(args.crop_scale_min, args.crop_scale_max),
-        augment_multiplier=3  # 3 augmented versions per image
+        augment_multiplier=args.aug_mult
     )
 
     print(f"\nUsing grayscale dataset: {grayscale_data}")
