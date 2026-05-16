@@ -17,7 +17,9 @@ import argparse
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
+import yaml
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.utils import colorstr
@@ -46,10 +48,106 @@ def parse_args():
                    help="Per-image probability of applying a zoom-in crop")
     p.add_argument("--crop_scale_min", type=float, default=0.3)
     p.add_argument("--crop_scale_max", type=float, default=0.7)
-    p.add_argument("--mosaic", type=float, default=0.0,
+    p.add_argument("--mosaic", type=float, default=0.1,
                    help="YOLO mosaic probability (default 0 — avoids implicit zoom-out)")
     p.add_argument("--name", default="grayscale_synth_v2")
+    p.add_argument("--preview", action="store_true",
+                   help="Save augmentation examples to debug_output/v2_augmentation_preview and exit")
+    p.add_argument("--preview_n", type=int, default=8,
+                   help="Number of source images to preview")
     return p.parse_args()
+
+
+def _draw_boxes(img: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """Draw YOLO-format bounding boxes [cls, cx, cy, w, h] normalised onto img."""
+    out = img.copy()
+    h, w = out.shape[:2]
+    for lbl in labels:
+        cls, cx, cy, bw, bh = lbl
+        x1 = int((cx - bw / 2) * w)
+        y1 = int((cy - bh / 2) * h)
+        x2 = int((cx + bw / 2) * w)
+        y2 = int((cy + bh / 2) * h)
+        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(out, str(int(cls)), (x1, max(y1 - 4, 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    return out
+
+
+def save_preview(data_yaml: Path, out_dir: Path, n_images: int,
+                 crop_scale_range: tuple) -> None:
+    """Save augmentation examples for visual inspection.
+
+    For each sampled source image writes five variants:
+      original, gray, binary, gray+crop, binary+crop
+    Bounding boxes are drawn in green on every variant.
+    """
+    with open(data_yaml) as f:
+        cfg = yaml.safe_load(f)
+
+    src_path = Path(cfg["path"])
+    train_val = cfg.get("train", "images")
+    img_dir = src_path / train_val
+    if not img_dir.is_dir():
+        img_dir = src_path / "images" / train_val
+    if not img_dir.is_dir():
+        img_dir = src_path / "images"
+
+    all_imgs = sorted(p for p in img_dir.glob("*")
+                      if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
+    if not all_imgs:
+        print(f"No images found in {img_dir}")
+        return
+
+    chosen = all_imgs[:n_images] if len(all_imgs) >= n_images else all_imgs
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resolve labels dir
+    lbl_dir = src_path / "labels"
+    for candidate in [src_path / "labels" / train_val,
+                      src_path / train_val.replace("images", "labels")]:
+        if Path(candidate).is_dir():
+            lbl_dir = Path(candidate)
+            break
+
+    for img_path in chosen:
+        color = cv2.imread(str(img_path))
+        if color is None:
+            continue
+
+        # Load labels
+        lbl_file = lbl_dir / (img_path.stem + ".txt")
+        labels = []
+        if lbl_file.exists():
+            for line in lbl_file.read_text().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 5:
+                    labels.append([float(v) for v in parts[:5]])
+        labels = np.array(labels) if labels else np.array([]).reshape(0, 5)
+
+        h, w = color.shape[:2]
+        stem = img_path.stem
+
+        # Prepare gray and binary from full color image
+        gray = to_grayscale(color)
+        binary = binarize_synth(color)
+
+        # Compute one crop region (used for both gray+crop and binary+crop)
+        y, x, ch, cw = sample_crop_params(h, w, crop_scale_range)
+        gray_crop, crop_labels = apply_crop_zoom(gray, labels, y, x, ch, cw)
+        binary_crop, _ = apply_crop_zoom(binary, labels, y, x, ch, cw)
+
+        variants = [
+            (f"{stem}_1_original.jpg",  color,       labels),
+            (f"{stem}_2_gray.jpg",      gray,        labels),
+            (f"{stem}_3_binary.jpg",    binary,      labels),
+            (f"{stem}_4_gray_crop.jpg", gray_crop,   crop_labels),
+            (f"{stem}_5_bin_crop.jpg",  binary_crop, crop_labels),
+        ]
+        for fname, img, lbls in variants:
+            cv2.imwrite(str(out_dir / fname), _draw_boxes(img, lbls))
+
+    print(f"Saved {len(chosen) * 5} preview images → {out_dir}")
 
 
 class PCBDataset(YOLODataset):
@@ -129,7 +227,7 @@ class PCBTrainer(DetectionTrainer):
             stride=gs,
             pad=0.0 if is_train else 0.5,
             prefix=colorstr(f"{mode}: "),
-            task=self.task,
+            task=getattr(self, "task", "detect"),
             classes=self.args.classes,
             data=self.data,
             fraction=getattr(self.args, "fraction", 1.0) if is_train else 1.0,
@@ -143,6 +241,15 @@ class PCBTrainer(DetectionTrainer):
 
 def main():
     args = parse_args()
+
+    if args.preview:
+        save_preview(
+            Path(args.data),
+            ROOT / "debug_output" / "v2_augmentation_preview",
+            n_images=args.preview_n,
+            crop_scale_range=(args.crop_scale_min, args.crop_scale_max),
+        )
+        return
 
     print("=" * 60)
     print("Synthetic PCB Training — on-the-fly augmentation (v2)")
