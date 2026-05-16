@@ -13,25 +13,24 @@ Usage:
 """
 
 import argparse
-import os
-import shutil
 import tempfile
 from pathlib import Path
 
 import cv2
 import numpy as np
+from tqdm import tqdm
 from ultralytics import YOLO
 
-from augmentations import GrayscaleAugmentor, to_grayscale, binarize_synth
+from augmentations import to_grayscale, binarize_synth
 
 ROOT = Path(__file__).parent.parent
-DEFAULT_DATA = ROOT / "datasets/generated_dataset/v2_demo/defects_v3/data.yaml"
-OUT = ROOT / "trained/yolo_grayscale_synth"
+DEFAULT_DATA = ROOT / "datasets/generated_dataset/v2/defects/data.yaml"
+OUT = ROOT / "yolo_training/results/synth_grayscale_aug"
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train YOLOv8 on grayscaled synthetic dataset")
-    p.add_argument("--model", default=str(ROOT / "yolov8m.pt"),
+    p.add_argument("--model", default=str(ROOT / "models/yolov8m.pt"),
                    help="Base weights (e.g. yolov8m.pt)")
     p.add_argument("--data", default=str(DEFAULT_DATA),
                    help="Path to dataset data.yaml")
@@ -52,78 +51,12 @@ def parse_args():
                    help="Augmentation multiplier per image")
     p.add_argument("--name", default="grayscale_synth",
                    help="Run name")
-    p.add_argument("--preprocess", action="store_true",
-                   help="Preprocess dataset to grayscale (saves to temp dir)")
+    p.add_argument("--tmp_dir", default=str(ROOT),
+                   help="Directory for temporary augmented dataset")
     return p.parse_args()
 
-
-def preprocess_dataset_to_grayscale(data_yaml: Path, augmentor: GrayscaleAugmentor) -> Path:
-    """Preprocess dataset: convert images to grayscale and save to temp directory.
-
-    This approach applies augmentations during preprocessing rather than training.
-    For a cleaner approach, YOLO's callback system could be used, but this is simpler.
-    """
-    import yaml
-
-    with open(data_yaml) as f:
-        data_config = yaml.safe_load(f)
-
-    src_path = Path(data_config["path"])
-    temp_dir = Path(tempfile.mkdtemp(prefix="yolo_grayscale_"))
-
-    print(f"Preprocessing dataset to: {temp_dir}")
-
-    # Process train and val splits
-    for split in ["train", "val"]:
-        if split not in data_config:
-            continue
-
-        split_dir = data_config[split]
-        src_images = src_path / split_dir
-        src_labels = src_path / "labels"
-
-        dst_images = temp_dir / "images" / split
-        dst_labels = temp_dir / "labels" / split
-        dst_images.mkdir(parents=True, exist_ok=True)
-        dst_labels.mkdir(parents=True, exist_ok=True)
-
-        for img_path in src_images.glob("*"):
-            if img_path.suffix.lower() not in [".jpg", ".jpeg", ".png"]:
-                continue
-
-            # Load and convert to grayscale
-            img = cv2.imread(str(img_path))
-            if img is None:
-                continue
-
-            gray_img = to_grayscale(img)
-
-            # Save grayscale image
-            dst_img_path = dst_images / img_path.name
-            cv2.imwrite(str(dst_img_path), gray_img)
-
-            # Copy label file
-            label_path = src_labels / (img_path.stem + ".txt")
-            if label_path.exists():
-                shutil.copy(label_path, dst_labels / label_path.name)
-
-    # Create new data.yaml
-    new_data_yaml = temp_dir / "data.yaml"
-    new_config = {
-        "path": str(temp_dir),
-        "train": "images/train" if "train" in data_config else "images",
-        "val": "images/val" if "val" in data_config else "images",
-        "names": data_config["names"]
-    }
-
-    with open(new_data_yaml, "w") as f:
-        yaml.dump(new_config, f)
-
-    return new_data_yaml
-
-
 def process_split(
-    src_images_dir: Path,
+    image_paths: list,
     src_labels_dir: Path,
     dst_images_dir: Path,
     dst_labels_dir: Path,
@@ -131,7 +64,8 @@ def process_split(
     crop_prob: float,
     crop_scale_range: tuple,
     augment_multiplier: int,
-    apply_augmentation: bool = True
+    apply_augmentation: bool = True,
+    desc: str = "Processing"
 ) -> tuple:
     """Process a single split (train or val)."""
     from augmentations import to_grayscale, binarize_synth, random_crop_zoom
@@ -142,7 +76,8 @@ def process_split(
     img_count = 0
     aug_count = 0
 
-    for img_path in sorted(src_images_dir.glob("*")):
+    for img_path in tqdm(sorted(image_paths), desc=desc):
+        img_path = Path(img_path)
         if img_path.suffix.lower() not in [".jpg", ".jpeg", ".png"]:
             continue
 
@@ -209,7 +144,8 @@ def create_augmented_dataset(
     binarize_prob: float = 0.25,
     crop_prob: float = 0.25,
     crop_scale_range: tuple = (0.3, 0.7),
-    augment_multiplier: int = 3
+    augment_multiplier: int = 3,
+    tmp_dir: Path = None
 ) -> Path:
     """Create augmented grayscale dataset with binarization and crop.
 
@@ -225,7 +161,7 @@ def create_augmented_dataset(
         data_config = yaml.safe_load(f)
 
     src_path = Path(data_config["path"])
-    temp_dir = Path(tempfile.mkdtemp(prefix="yolo_grayscale_aug_"))
+    temp_dir = Path(tempfile.mkdtemp(prefix="yolo_grayscale_aug_", dir=tmp_dir))
 
     print(f"Creating augmented grayscale dataset at: {temp_dir}")
     print(f"  Binarization prob: {binarize_prob}")
@@ -236,14 +172,36 @@ def create_augmented_dataset(
     train_split = data_config.get("train", "images")
     val_split = data_config.get("val", train_split)
 
-    # Check if it's a flat structure (images/) or split structure (images/train/, images/val/)
-    train_images_dir = src_path / train_split
-    if not train_images_dir.exists():
-        train_images_dir = src_path / "images" / train_split
+    # Helper to get image paths from either txt file list or directory
+    def get_image_paths(split_value: str) -> list:
+        if split_value.endswith(".txt"):
+            txt_path = src_path / split_value
+            if txt_path.exists():
+                paths = []
+                with open(txt_path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        p = Path(line)
+                        if p.exists():
+                            paths.append(str(p))
+                        else:
+                            # Try relative to src_path/images using just filename
+                            relative_p = src_path / "images" / p.name
+                            if relative_p.exists():
+                                paths.append(str(relative_p))
+                return paths
+        # Fall back to directory globbing
+        split_dir = src_path / split_value
+        if not split_dir.exists():
+            split_dir = src_path / "images" / split_value
+        if split_dir.exists() and split_dir.is_dir():
+            return list(split_dir.glob("*"))
+        return []
 
-    val_images_dir = src_path / val_split
-    if not val_images_dir.exists():
-        val_images_dir = src_path / "images" / val_split
+    train_image_paths = get_image_paths(train_split)
+    val_image_paths = get_image_paths(val_split)
 
     # Labels directory - check common structures
     if (src_path / "labels" / "train").exists():
@@ -256,28 +214,28 @@ def create_augmented_dataset(
         train_labels_dir = src_path / "labels"
         val_labels_dir = src_path / "labels"
 
-    print(f"  Train images: {train_images_dir}")
+    print(f"  Train images: {len(train_image_paths)} files")
     print(f"  Train labels: {train_labels_dir}")
-    print(f"  Val images: {val_images_dir}")
+    print(f"  Val images: {len(val_image_paths)} files")
     print(f"  Val labels: {val_labels_dir}")
 
     # Process training set (with augmentation)
-    print("\nProcessing training set...")
     train_img_count, train_aug_count = process_split(
-        train_images_dir, train_labels_dir,
+        train_image_paths, train_labels_dir,
         temp_dir / "images" / "train", temp_dir / "labels" / "train",
         binarize_prob, crop_prob, crop_scale_range, augment_multiplier,
-        apply_augmentation=True
+        apply_augmentation=True,
+        desc="Train (gray+aug)"
     )
     print(f"  Train: {train_img_count} grayscale + {train_aug_count} augmented = {train_img_count + train_aug_count} total")
 
     # Process validation set (grayscale only, no augmentation)
-    print("\nProcessing validation set...")
     val_img_count, _ = process_split(
-        val_images_dir, val_labels_dir,
+        val_image_paths, val_labels_dir,
         temp_dir / "images" / "val", temp_dir / "labels" / "val",
         binarize_prob, crop_prob, crop_scale_range, augment_multiplier,
-        apply_augmentation=False  # No augmentation for validation
+        apply_augmentation=False,
+        desc="Val (gray only)"
     )
     print(f"  Val: {val_img_count} grayscale images")
 
@@ -316,7 +274,8 @@ def main():
         binarize_prob=args.binarize_p,
         crop_prob=args.crop_p,
         crop_scale_range=(args.crop_scale_min, args.crop_scale_max),
-        augment_multiplier=args.aug_mult
+        augment_multiplier=args.aug_mult,
+        tmp_dir=Path(args.tmp_dir)
     )
 
     print(f"\nUsing grayscale dataset: {grayscale_data}")
