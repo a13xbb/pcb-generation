@@ -176,6 +176,83 @@ def random_crop_zoom(
     return cropped, np.array(adjusted_labels) if adjusted_labels else np.array([])
 
 
+def sample_crop_params(
+    h: int,
+    w: int,
+    scale_range: Tuple[float, float] = (0.3, 0.7)
+) -> Tuple[int, int, int, int]:
+    """Return (y, x, crop_h, crop_w) for a random zoom-in crop."""
+    scale = np.random.uniform(scale_range[0], scale_range[1])
+    crop_h, crop_w = int(h * scale), int(w * scale)
+    y = np.random.randint(0, h - crop_h + 1)
+    x = np.random.randint(0, w - crop_w + 1)
+    return y, x, crop_h, crop_w
+
+
+def apply_crop_zoom(
+    img: np.ndarray,
+    labels: np.ndarray,
+    y: int,
+    x: int,
+    crop_h: int,
+    crop_w: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Apply pre-computed crop params to img+labels (same logic as random_crop_zoom).
+
+    Use sample_crop_params to get (y, x, crop_h, crop_w), then call this on
+    multiple images sharing the same source crop so their labels stay in sync.
+    """
+    h, w = img.shape[:2]
+
+    cropped = img[y:y + crop_h, x:x + crop_w]
+    cropped = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    if len(labels) == 0:
+        return cropped, labels
+
+    adjusted_labels = []
+    for label in labels:
+        cls_id, cx, cy, bw, bh = label
+
+        abs_cx = cx * w
+        abs_cy = cy * h
+        abs_w = bw * w
+        abs_h = bh * h
+
+        x1 = abs_cx - abs_w / 2
+        y1 = abs_cy - abs_h / 2
+        x2 = abs_cx + abs_w / 2
+        y2 = abs_cy + abs_h / 2
+
+        x1_crop = max(x1, x) - x
+        y1_crop = max(y1, y) - y
+        x2_crop = min(x2, x + crop_w) - x
+        y2_crop = min(y2, y + crop_h) - y
+
+        if x2_crop <= x1_crop or y2_crop <= y1_crop:
+            continue
+
+        new_w = x2_crop - x1_crop
+        new_h = y2_crop - y1_crop
+        if new_w * new_h < abs_w * abs_h * 0.7:
+            continue
+
+        if not (x <= abs_cx <= x + crop_w and y <= abs_cy <= y + crop_h):
+            continue
+
+        scale_x = w / crop_w
+        scale_y = h / crop_h
+
+        new_cx = np.clip((x1_crop + x2_crop) / 2 * scale_x / w, 0, 1)
+        new_cy = np.clip((y1_crop + y2_crop) / 2 * scale_y / h, 0, 1)
+        new_bw = np.clip((x2_crop - x1_crop) * scale_x / w, 0, 1)
+        new_bh = np.clip((y2_crop - y1_crop) * scale_y / h, 0, 1)
+
+        adjusted_labels.append([cls_id, new_cx, new_cy, new_bw, new_bh])
+
+    return cropped, np.array(adjusted_labels) if adjusted_labels else np.array([])
+
+
 class GrayscaleAugmentor:
     """Augmentor for grayscale training with binarization and zoom."""
 
