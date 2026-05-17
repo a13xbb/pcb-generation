@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Train YOLOv8 on synthetic PCB dataset with on-the-fly augmentations.
+"""Train YOLOv8 on real PCB dataset with grayscale + manual zoom-in crops.
 
 Per image, per epoch (training only):
-  1. With prob binarize_p → binarize (on the color image); else → grayscale
-  2. With prob crop_p     → random zoom-in crop
+  1. Convert to grayscale
+  2. With prob crop_p → random zoom-in crop
 
-Val images are always converted to grayscale with no other transforms.
-No preprocessed dataset is written to disk — original color images are used directly.
+Val images are grayscale only, no crop augmentation.
 
 Usage:
-    python train_grayscale_synth_v2.py --data path/to/data.yaml
-    python train_grayscale_synth_v2.py --binarize_p 0.3 --crop_p 0.3 --epochs 150
+    python train_real_grayscale.py
+    python train_real_grayscale.py --crop_p 0.3 --epochs 100
+    python train_real_grayscale.py --preview  # visualize augmentations
 """
 
 import argparse
@@ -26,33 +26,31 @@ from ultralytics.utils import colorstr
 from ultralytics.utils.torch_utils import is_parallel
 
 sys.path.insert(0, str(Path(__file__).parent))
-from augmentations import to_grayscale, binarize_synth, sample_crop_params, apply_crop_zoom
+from augmentations import to_grayscale, sample_crop_params, apply_crop_zoom
 
 ROOT = Path(__file__).parent.parent
-DEFAULT_DATA = ROOT / "datasets/generated_dataset/v2/defects/data.yaml"
-OUT = ROOT / "yolo_training/results/synth_grayscale_aug_v2"
+DATA = ROOT / "datasets/pcb-defect-dataset/data_synth_aligned.yaml"
+OUT = ROOT / "yolo_training/results"
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Train YOLOv8 with on-the-fly gray/binary/crop augmentation")
+    p = argparse.ArgumentParser(description="Train YOLOv8 on real PCB with grayscale + zoom-in augmentation")
     p.add_argument("--model", default=str(ROOT / "models/yolov8m.pt"))
-    p.add_argument("--data", default=str(DEFAULT_DATA), help="data.yaml for the source (color) dataset")
-    p.add_argument("--epochs", type=int, default=150)
+    p.add_argument("--data", default=str(DATA), help="data.yaml for the dataset")
+    p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--imgsz", type=int, default=640)
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--workers", type=int, default=0)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--binarize_p", type=float, default=0.3,
-                   help="Per-image probability of binarizing instead of grayscaling")
     p.add_argument("--crop_p", type=float, default=0.3,
                    help="Per-image probability of applying a zoom-in crop")
     p.add_argument("--crop_scale_min", type=float, default=0.3)
     p.add_argument("--crop_scale_max", type=float, default=0.7)
     p.add_argument("--mosaic", type=float, default=0.1,
-                   help="YOLO mosaic probability (default 0 — avoids implicit zoom-out)")
-    p.add_argument("--name", default="synth_grayscale_aug_v2")
+                   help="YOLO mosaic probability")
+    p.add_argument("--name", default="real_grayscale_v1")
     p.add_argument("--preview", action="store_true",
-                   help="Save augmentation examples to debug_output/v2_augmentation_preview and exit")
+                   help="Save augmentation examples to debug_output/real_grayscale_preview and exit")
     p.add_argument("--preview_n", type=int, default=8,
                    help="Number of source images to preview")
     return p.parse_args()
@@ -78,37 +76,59 @@ def save_preview(data_yaml: Path, out_dir: Path, n_images: int,
                  crop_scale_range: tuple) -> None:
     """Save augmentation examples for visual inspection.
 
-    For each sampled source image writes five variants:
-      original, gray, binary, gray+crop, binary+crop
+    For each sampled source image writes three variants:
+      original, gray, gray+crop
     Bounding boxes are drawn in green on every variant.
     """
     with open(data_yaml) as f:
         cfg = yaml.safe_load(f)
 
-    src_path = Path(cfg["path"])
-    train_val = cfg.get("train", "images")
-    img_dir = src_path / train_val
-    if not img_dir.is_dir():
-        img_dir = src_path / "images" / train_val
-    if not img_dir.is_dir():
-        img_dir = src_path / "images"
+    # Resolve path relative to yaml file location
+    cfg_path = Path(cfg["path"])
+    if not cfg_path.is_absolute():
+        src_path = (data_yaml.parent / cfg_path).resolve()
+    else:
+        src_path = cfg_path
 
-    all_imgs = sorted(p for p in img_dir.glob("*")
-                      if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
+    train_val = cfg.get("train", "images")
+
+    # Handle txt file vs directory
+    all_imgs = []
+    if train_val.endswith(".txt"):
+        txt_path = src_path / train_val
+        if txt_path.exists():
+            for line in txt_path.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                p = Path(line)
+                if p.exists():
+                    all_imgs.append(p)
+                else:
+                    # Try to find image by name in train/images
+                    alt_path = src_path / "train" / "images" / p.name
+                    if alt_path.exists():
+                        all_imgs.append(alt_path)
+    else:
+        img_dir = src_path / train_val
+        if not img_dir.is_dir():
+            img_dir = src_path / "images" / train_val
+        if not img_dir.is_dir():
+            img_dir = src_path / "images"
+        all_imgs = sorted(p for p in img_dir.glob("*")
+                          if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
+
     if not all_imgs:
-        print(f"No images found in {img_dir}")
+        print(f"No images found for train={train_val} in {src_path}")
         return
 
-    chosen = all_imgs[:n_images] if len(all_imgs) >= n_images else all_imgs
+    chosen = sorted(all_imgs)[:n_images] if len(all_imgs) >= n_images else all_imgs
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Resolve labels dir
-    lbl_dir = src_path / "labels"
-    for candidate in [src_path / "labels" / train_val,
-                      src_path / train_val.replace("images", "labels")]:
-        if Path(candidate).is_dir():
-            lbl_dir = Path(candidate)
-            break
+    lbl_dir = src_path / "train" / "labels"
+    if not lbl_dir.is_dir():
+        lbl_dir = src_path / "labels"
 
     for img_path in chosen:
         color = cv2.imread(str(img_path))
@@ -128,39 +148,34 @@ def save_preview(data_yaml: Path, out_dir: Path, n_images: int,
         h, w = color.shape[:2]
         stem = img_path.stem
 
-        # Prepare gray and binary from full color image
+        # Prepare gray from full color image
         gray = to_grayscale(color)
-        binary = binarize_synth(color)
 
-        # Compute one crop region (used for both gray+crop and binary+crop)
+        # Compute one crop region
         y, x, ch, cw = sample_crop_params(h, w, crop_scale_range)
         gray_crop, crop_labels = apply_crop_zoom(gray, labels, y, x, ch, cw)
-        binary_crop, _ = apply_crop_zoom(binary, labels, y, x, ch, cw)
 
         variants = [
-            (f"{stem}_1_original.jpg",  color,       labels),
-            (f"{stem}_2_gray.jpg",      gray,        labels),
-            (f"{stem}_3_binary.jpg",    binary,      labels),
-            (f"{stem}_4_gray_crop.jpg", gray_crop,   crop_labels),
-            (f"{stem}_5_bin_crop.jpg",  binary_crop, crop_labels),
+            (f"{stem}_1_original.jpg", color, labels),
+            (f"{stem}_2_gray.jpg", gray, labels),
+            (f"{stem}_3_gray_crop.jpg", gray_crop, crop_labels),
         ]
         for fname, img, lbls in variants:
             cv2.imwrite(str(out_dir / fname), _draw_boxes(img, lbls))
 
-    print(f"Saved {len(chosen) * 5} preview images → {out_dir}")
+    print(f"Saved {len(chosen) * 3} preview images -> {out_dir}")
 
 
-class PCBDataset(YOLODataset):
-    """YOLODataset with on-the-fly grayscale/binary and zoom-in crop augmentation.
+class RealPCBDataset(YOLODataset):
+    """YOLODataset with grayscale conversion and zoom-in crop augmentation.
 
-    load_image applies gray or binary conversion every time an image is loaded,
-    giving fresh randomness each epoch. get_image_and_label then optionally crops.
+    load_image applies grayscale conversion every time an image is loaded.
+    get_image_and_label then optionally crops.
     Both augmentations are disabled for the val split (pcb_augment=False).
     """
 
-    def __init__(self, *args, binarize_p=0.3, crop_p=0.3,
+    def __init__(self, *args, crop_p=0.3,
                  crop_scale_range=(0.3, 0.7), pcb_augment=True, **kwargs):
-        self.binarize_p = binarize_p
         self.crop_p = crop_p
         self.crop_scale_range = crop_scale_range
         self.pcb_augment = pcb_augment
@@ -168,15 +183,10 @@ class PCBDataset(YOLODataset):
 
     def load_image(self, i):
         img, orig_shape, resized_shape = super().load_image(i)
-        # Binarize on the color image before any further processing
-        if self.pcb_augment and np.random.random() < self.binarize_p:
-            img = binarize_synth(img)
-        else:
-            img = to_grayscale(img)
-        return img, orig_shape, resized_shape
+        return to_grayscale(img), orig_shape, resized_shape
 
     def get_image_and_label(self, index):
-        label = super().get_image_and_label(index)  # calls load_image → gray/binary already applied
+        label = super().get_image_and_label(index)
         if not self.pcb_augment:
             return label
 
@@ -188,7 +198,6 @@ class PCBDataset(YOLODataset):
         h, w = img.shape[:2]
         y, x, crop_h, crop_w = sample_crop_params(h, w, self.crop_scale_range)
 
-        # apply_crop_zoom expects (N, 5) with [cls, cx, cy, w, h]
         combined = np.hstack([label["cls"], bboxes])
         img_crop, combined_crop = apply_crop_zoom(img, combined, y, x, crop_h, crop_w)
 
@@ -200,13 +209,10 @@ class PCBDataset(YOLODataset):
         return label
 
 
-class PCBTrainer(DetectionTrainer):
-    """DetectionTrainer that uses PCBDataset for on-the-fly PCB augmentations."""
+class RealPCBTrainer(DetectionTrainer):
+    """DetectionTrainer using RealPCBDataset for grayscale + zoom-in augmentation."""
 
-    def __init__(self, *args, binarize_p=0.3, crop_p=0.3,
-                 crop_scale_range=(0.3, 0.7), **kwargs):
-        # Store before super().__init__ in case build_dataset is called during init
-        self.binarize_p = binarize_p
+    def __init__(self, *args, crop_p=0.3, crop_scale_range=(0.3, 0.7), **kwargs):
         self.crop_p = crop_p
         self.crop_scale_range = crop_scale_range
         super().__init__(*args, **kwargs)
@@ -215,7 +221,7 @@ class PCBTrainer(DetectionTrainer):
         model = self.model.module if is_parallel(self.model) else self.model if self.model else None
         gs = max(int(model.stride.max()) if model else 0, 32)
         is_train = mode == "train"
-        return PCBDataset(
+        return RealPCBDataset(
             img_path=img_path,
             imgsz=self.args.imgsz,
             batch_size=batch,
@@ -232,7 +238,6 @@ class PCBTrainer(DetectionTrainer):
             data=self.data,
             fraction=getattr(self.args, "fraction", 1.0) if is_train else 1.0,
             # PCB-specific
-            binarize_p=self.binarize_p,
             crop_p=self.crop_p,
             crop_scale_range=self.crop_scale_range,
             pcb_augment=is_train,
@@ -245,22 +250,21 @@ def main():
     if args.preview:
         save_preview(
             Path(args.data),
-            ROOT / "debug_output" / "v2_augmentation_preview",
+            ROOT / "debug_output" / "real_grayscale_preview",
             n_images=args.preview_n,
             crop_scale_range=(args.crop_scale_min, args.crop_scale_max),
         )
         return
 
     print("=" * 60)
-    print("Synthetic PCB Training — on-the-fly augmentation (v2)")
+    print("Real PCB Training - grayscale + zoom-in augmentation")
     print("=" * 60)
-    print(f"  binarize_p : {args.binarize_p}  (else grayscale)")
     print(f"  crop_p     : {args.crop_p}  scale [{args.crop_scale_min}, {args.crop_scale_max}]")
     print(f"  mosaic     : {args.mosaic}")
     print(f"  data       : {args.data}")
     print("=" * 60)
 
-    trainer = PCBTrainer(
+    trainer = RealPCBTrainer(
         overrides=dict(
             model=args.model,
             data=args.data,
@@ -275,7 +279,7 @@ def main():
             patience=20,
             save=True,
             plots=True,
-            # Disable color-space YOLO augmentations (images are gray/binary)
+            # Same augmentations as train_grayscale_synth_v2.py
             hsv_h=0.0,
             hsv_s=0.0,
             hsv_v=0.4,
@@ -290,7 +294,6 @@ def main():
             mixup=0.0,
             copy_paste=0.0,
         ),
-        binarize_p=args.binarize_p,
         crop_p=args.crop_p,
         crop_scale_range=(args.crop_scale_min, args.crop_scale_max),
     )
