@@ -29,10 +29,15 @@ def _create_spur_shape(
     spur_width: int,
     img_shape: tuple,
 ) -> np.ndarray:
+    """Create spur shape extending only outward from trace center.
+
+    Shapes: semi-sphere, semi-oval, rectangle, trapezoid
+    All extend from (center_x, center_y) in the outward_angle direction only.
+    """
     h, w = img_shape
     spur_mask = np.zeros((h, w), dtype=np.uint8)
 
-    shape_type = rng.choice(["semicircle", "trapezoid", "blob"])
+    shape_type = rng.choice(["semi_sphere", "semi_oval", "rectangle", "trapezoid"])
 
     cos_a = np.cos(outward_angle)
     sin_a = np.sin(outward_angle)
@@ -41,84 +46,159 @@ def _create_spur_shape(
 
     base_x = center_x
     base_y = center_y
+    half_width = spur_width // 2
 
-    if shape_type == "semicircle":
-        # Half-circle extending outward
-        radius = max(3, int(spur_length * rng.uniform(0.7, 1.0)))
-        half_width = max(3, int(spur_width * rng.uniform(0.4, 0.6)))
-
-        # Center of the semicircle is at the base
-        n_arc_points = 20
+    if shape_type == "semi_sphere":
+        # Half circle extending outward, radius = spur_length
+        radius = max(3, spur_length)
+        n_points = 30
         points = []
 
-        # Draw arc from one side to the other
-        for i in range(n_arc_points):
-            theta = -np.pi / 2 + np.pi * i / (n_arc_points - 1)
-            # theta goes from -90 to +90 degrees (half circle)
-            r = radius
-            arc_x = r * np.cos(theta)  # 0 to r to 0
-            arc_y = r * np.sin(theta)  # -r to 0 to +r
+        # Arc from -90 to +90 degrees in outward direction
+        for i in range(n_points + 1):
+            theta = -np.pi / 2 + np.pi * i / n_points
+            # Point on semicircle
+            r_x = radius * np.cos(theta)  # 0 -> radius -> 0
+            r_y = radius * np.sin(theta)  # -radius -> 0 -> +radius
 
-            # Transform: arc_x is along outward direction, arc_y is perpendicular
-            px = int(base_x + arc_x * cos_a + arc_y * perp_cos * (half_width / radius))
-            py = int(base_y + arc_x * sin_a + arc_y * perp_sin * (half_width / radius))
+            # Transform to world coordinates
+            px = int(base_x + r_x * cos_a + r_y * perp_cos)
+            py = int(base_y + r_x * sin_a + r_y * perp_sin)
             points.append([px, py])
 
         pts = np.array(points, np.int32)
         cv2.fillPoly(spur_mask, [pts], 255)
 
-    elif shape_type == "trapezoid":
-        # Trapezoid: wider at base, narrower at tip
-        length = max(3, int(spur_length * rng.uniform(0.8, 1.0)))
-        base_half_width = max(3, int(spur_width * rng.uniform(0.4, 0.6)))
-        tip_half_width = max(2, int(base_half_width * rng.uniform(0.3, 0.6)))
+    elif shape_type == "semi_oval":
+        # Half ellipse: length outward, width along trace
+        length = max(3, spur_length)
+        n_points = 30
+        points = []
 
-        # Four corners of trapezoid
-        points = [
-            # Base left
-            (int(base_x + base_half_width * perp_cos),
-             int(base_y + base_half_width * perp_sin)),
-            # Base right
-            (int(base_x - base_half_width * perp_cos),
-             int(base_y - base_half_width * perp_sin)),
-            # Tip right
-            (int(base_x + length * cos_a - tip_half_width * perp_cos),
-             int(base_y + length * sin_a - tip_half_width * perp_sin)),
-            # Tip left
-            (int(base_x + length * cos_a + tip_half_width * perp_cos),
-             int(base_y + length * sin_a + tip_half_width * perp_sin)),
-        ]
+        for i in range(n_points + 1):
+            theta = -np.pi / 2 + np.pi * i / n_points
+            # Ellipse point
+            r_x = length * np.cos(theta)  # outward extent
+            r_y = half_width * np.sin(theta)  # along-trace extent
+
+            px = int(base_x + r_x * cos_a + r_y * perp_cos)
+            py = int(base_y + r_x * sin_a + r_y * perp_sin)
+            points.append([px, py])
 
         pts = np.array(points, np.int32)
         cv2.fillPoly(spur_mask, [pts], 255)
 
-    else:  # blob - organic irregular shape
-        length = max(3, int(spur_length * rng.uniform(0.7, 1.0)))
-        half_width = max(3, int(spur_width * rng.uniform(0.3, 0.5)))
+    elif shape_type == "rectangle":
+        # Rectangle: length outward, width along trace
+        length = max(3, spur_length)
+        use_rounded = rng.random() < 0.5
 
-        # Generate blob using multiple overlapping ellipses
-        n_ellipses = rng.integers(2, 4)
-        for i in range(n_ellipses):
-            # Position along the spur direction
-            t = rng.uniform(0.2, 0.8)
-            cx = int(base_x + t * length * cos_a + rng.uniform(-0.2, 0.2) * half_width * perp_cos)
-            cy = int(base_y + t * length * sin_a + rng.uniform(-0.2, 0.2) * half_width * perp_sin)
+        if use_rounded:
+            # Rounded rectangle using multiple points
+            corner_r = max(2, min(length // 3, half_width // 3))
+            points = []
+            n_corner = 5
 
-            # Random ellipse size
-            axes = (
-                max(3, int(half_width * rng.uniform(0.6, 1.2))),
-                max(3, int(length * 0.3 * rng.uniform(0.5, 1.0)))
-            )
+            # Four corners: base-left, base-right, tip-right, tip-left
+            corners = [
+                (0, -half_width, np.pi, 3*np.pi/2),      # base-left
+                (0, half_width, np.pi/2, np.pi),         # base-right
+                (length, half_width, 0, np.pi/2),        # tip-right
+                (length, -half_width, 3*np.pi/2, 2*np.pi) # tip-left
+            ]
 
-            # Angle aligned with spur direction
-            angle_deg = np.degrees(outward_angle) + rng.uniform(-15, 15)
+            for (cx_local, cy_local, start_a, end_a) in corners:
+                # Adjust corner center inward
+                cx_adj = cx_local + (corner_r if cx_local == 0 else -corner_r)
+                cy_adj = cy_local + (corner_r if cy_local < 0 else -corner_r)
 
-            cv2.ellipse(spur_mask, (cx, cy), axes, angle_deg, 0, 360, 255, -1)
+                for j in range(n_corner):
+                    a = start_a + (end_a - start_a) * j / (n_corner - 1)
+                    lx = cx_adj + corner_r * np.cos(a)
+                    ly = cy_adj + corner_r * np.sin(a)
+                    px = int(base_x + lx * cos_a + ly * perp_cos)
+                    py = int(base_y + lx * sin_a + ly * perp_sin)
+                    points.append([px, py])
 
-        # Also draw base ellipse to connect to trace
-        base_axes = (max(3, int(half_width * 0.8)), max(2, int(length * 0.2)))
-        cv2.ellipse(spur_mask, (base_x, base_y), base_axes,
-                    np.degrees(outward_angle), 0, 360, 255, -1)
+            pts = np.array(points, np.int32)
+            cv2.fillPoly(spur_mask, [pts], 255)
+        else:
+            # Sharp rectangle
+            points = [
+                (int(base_x - half_width * perp_cos), int(base_y - half_width * perp_sin)),
+                (int(base_x + half_width * perp_cos), int(base_y + half_width * perp_sin)),
+                (int(base_x + length * cos_a + half_width * perp_cos),
+                 int(base_y + length * sin_a + half_width * perp_sin)),
+                (int(base_x + length * cos_a - half_width * perp_cos),
+                 int(base_y + length * sin_a - half_width * perp_sin)),
+            ]
+            pts = np.array(points, np.int32)
+            cv2.fillPoly(spur_mask, [pts], 255)
+
+    else:  # trapezoid
+        # Trapezoid: wider at base, narrower at tip
+        length = max(3, spur_length)
+        tip_ratio = rng.uniform(0.3, 0.7)  # tip is 30-70% of base width
+        tip_half_width = max(2, int(half_width * tip_ratio))
+        use_rounded = rng.random() < 0.5
+
+        if use_rounded:
+            # Rounded trapezoid
+            corner_r = max(2, min(length // 4, tip_half_width // 2))
+            points = []
+            n_corner = 5
+
+            # Base corners (wider)
+            # Base-left corner
+            for j in range(n_corner):
+                a = np.pi + (np.pi/2) * j / (n_corner - 1)
+                lx = corner_r + corner_r * np.cos(a)
+                ly = -half_width + corner_r + corner_r * np.sin(a)
+                px = int(base_x + lx * cos_a + ly * perp_cos)
+                py = int(base_y + lx * sin_a + ly * perp_sin)
+                points.append([px, py])
+
+            # Base-right corner
+            for j in range(n_corner):
+                a = np.pi/2 + (np.pi/2) * j / (n_corner - 1)
+                lx = corner_r + corner_r * np.cos(a)
+                ly = half_width - corner_r + corner_r * np.sin(a)
+                px = int(base_x + lx * cos_a + ly * perp_cos)
+                py = int(base_y + lx * sin_a + ly * perp_sin)
+                points.append([px, py])
+
+            # Tip-right corner
+            for j in range(n_corner):
+                a = 0 + (np.pi/2) * j / (n_corner - 1)
+                lx = length - corner_r + corner_r * np.cos(a)
+                ly = tip_half_width - corner_r + corner_r * np.sin(a)
+                px = int(base_x + lx * cos_a + ly * perp_cos)
+                py = int(base_y + lx * sin_a + ly * perp_sin)
+                points.append([px, py])
+
+            # Tip-left corner
+            for j in range(n_corner):
+                a = 3*np.pi/2 + (np.pi/2) * j / (n_corner - 1)
+                lx = length - corner_r + corner_r * np.cos(a)
+                ly = -tip_half_width + corner_r + corner_r * np.sin(a)
+                px = int(base_x + lx * cos_a + ly * perp_cos)
+                py = int(base_y + lx * sin_a + ly * perp_sin)
+                points.append([px, py])
+
+            pts = np.array(points, np.int32)
+            cv2.fillPoly(spur_mask, [pts], 255)
+        else:
+            # Sharp trapezoid
+            points = [
+                (int(base_x - half_width * perp_cos), int(base_y - half_width * perp_sin)),
+                (int(base_x + half_width * perp_cos), int(base_y + half_width * perp_sin)),
+                (int(base_x + length * cos_a + tip_half_width * perp_cos),
+                 int(base_y + length * sin_a + tip_half_width * perp_sin)),
+                (int(base_x + length * cos_a - tip_half_width * perp_cos),
+                 int(base_y + length * sin_a - tip_half_width * perp_sin)),
+            ]
+            pts = np.array(points, np.int32)
+            cv2.fillPoly(spur_mask, [pts], 255)
 
     return spur_mask
 
@@ -244,35 +324,50 @@ def generate_spur(
     sx, sy = selected_point
     trace_width_canvas = 2 * half_width_canvas
 
-    # Extension beyond trace edge: 50-100% of trace width, minimum 15 canvas px for visibility
-    extension_canvas = max(15, int(trace_width_canvas * rng.uniform(0.5, 1.0)))
-
     h, w = image.shape[:2]
     scale_x = w / w_m
     scale_y = h / h_m
     avg_scale = (scale_x + scale_y) / 2
-
-    # Anchor spur at the trace EDGE (not skeleton center) so it is always visually attached
-    edge_x_img = int((sx + half_width_canvas * np.cos(outward_angle)) * scale_x)
-    edge_y_img = int((sy + half_width_canvas * np.sin(outward_angle)) * scale_y)
-
-    spur_length_img = max(9, int(extension_canvas * avg_scale))
     trace_width_img = max(1, int(trace_width_canvas * avg_scale))
-    # Width along trace edge: varies from narrow (trace width) to wide (2.5x trace width)
-    spur_width_img = max(12, min(45, int(trace_width_img * rng.uniform(0.8, 2.5))))
 
-    # Create spur shape starting at trace edge, extending outward
+    # Anchor spur inside the trace (at skeleton center) so it grows outward through the edge
+    anchor_x_img = int(sx * scale_x)
+    anchor_y_img = int(sy * scale_y)
+
+    # Spur length = half trace width (to reach edge) + outward extension (20-60% of trace width)
+    outward_extension = trace_width_canvas * rng.uniform(0.2, 0.6)
+    total_length_canvas = half_width_canvas + outward_extension
+    spur_length_img = max(10, int(total_length_canvas * avg_scale))
+
+    # Vary width along trace edge: 4-10x trace width (long along trace)
+    spur_width_img = max(25, min(120, int(trace_width_img * rng.uniform(4.0, 10.0))))
+
+    # Create spur shape extending outward from trace center (will pass through edge)
     spur_mask = _create_spur_shape(
-        rng, edge_x_img, edge_y_img, outward_angle, spur_length_img, spur_width_img, (h, w)
+        rng, anchor_x_img, anchor_y_img, outward_angle, spur_length_img, spur_width_img, (h, w)
     )
 
-    # Mask out areas that overlap with other traces (except the source trace)
+    # Create half-plane mask: only keep pixels on the outward side of the anchor
+    # This prevents the spur from crossing to the opposite side of the trace
+    yy, xx = np.mgrid[0:h, 0:w]
+    # Vector from anchor to each pixel
+    dx = xx - anchor_x_img
+    dy = yy - anchor_y_img
+    # Dot product with outward direction - positive means on outward side
+    outward_dot = dx * np.cos(outward_angle) + dy * np.sin(outward_angle)
+    # Allow a small margin into the trace for attachment (a few pixels)
+    outward_side_mask = (outward_dot > -3).astype(np.uint8)
+    spur_mask = spur_mask & (outward_side_mask * 255)
+
+    # Mask out areas that overlap with other traces or pads
     trace_mask_scaled = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
     occupied_scaled = cv2.resize(occupied, (w, h), interpolation=cv2.INTER_NEAREST)
-    other_traces_mask = (occupied_scaled > 0) & (trace_mask_scaled == 0)
+    pad_zone_scaled = cv2.resize(pad_zone, (w, h), interpolation=cv2.INTER_NEAREST)
 
-    # Spur should not overlap other traces
-    spur_mask = spur_mask & (~other_traces_mask).astype(np.uint8) * 255
+    # Spur should not overlap: other traces or pads
+    other_traces_mask = (occupied_scaled > 0) & (trace_mask_scaled == 0)
+    exclusion_mask = (other_traces_mask) | (pad_zone_scaled > 0)
+    spur_mask = spur_mask & (~exclusion_mask).astype(np.uint8) * 255
 
     # Check spur has reasonable size
     spur_pixels = np.sum(spur_mask > 0)
@@ -301,7 +396,7 @@ def generate_spur(
 
     annotation = DefectAnnotation.from_pixel_bbox(
         CLASS_IDS["spur"], x1, y1, x2, y2, w, h,
-        metadata={"extension_px": extension_canvas}
+        metadata={"length_px": spur_length_img}
     )
 
     return DefectResult(success=True, annotation=annotation)
