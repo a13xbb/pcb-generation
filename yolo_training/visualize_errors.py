@@ -21,6 +21,7 @@ import argparse
 from pathlib import Path
 
 import cv2
+import numpy as np
 import fiftyone as fo
 from ultralytics import YOLO
 
@@ -158,6 +159,7 @@ def parse_args():
     p.add_argument("--port", type=int, default=5150, help="FiftyOne app port")
     p.add_argument("--name", type=str, default="pcb_analysis", help="Dataset name")
     p.add_argument("--delete", action="store_true", help="Delete existing dataset and recreate")
+    p.add_argument("--grayscale", action="store_true", help="Convert images to grayscale before inference (for models trained on grayscale)")
     return p.parse_args()
 
 
@@ -200,7 +202,13 @@ def main():
             sample["ground_truth"] = load_yolo_labels(label_path, CLASS_NAMES)
 
             # Predictions
-            results = model(str(img_path), conf=args.conf, verbose=False)[0]
+            if args.grayscale:
+                bgr = cv2.imread(str(img_path))
+                gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                img_input = np.stack([gray, gray, gray], axis=-1)
+            else:
+                img_input = str(img_path)
+            results = model(img_input, conf=args.conf, verbose=False)[0]
             sample["predictions"] = yolo_to_fo_detections(results, CLASS_NAMES)
 
             samples.append(sample)

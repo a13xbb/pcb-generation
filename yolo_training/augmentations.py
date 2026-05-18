@@ -21,6 +21,67 @@ def find_background_color(img: np.ndarray) -> Tuple[int, int, int]:
     return color_counts.most_common(1)[0][0]
 
 
+def binarize_real(img: np.ndarray) -> np.ndarray:
+    """Binarize a real PCB image to DeepPCB-style binary (copper=black, background=white).
+
+    CLAHE on grayscale enhances local contrast so Otsu reliably separates copper
+    from the solder-mask substrate regardless of lighting variation across the board.
+    Run on the full image before cropping — the global threshold is stable;
+    per-patch thresholds are not.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.medianBlur(gray, 5)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(16, 16))
+    enhanced = clahe.apply(blurred)
+    _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel = np.ones((3, 3), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+
+def binarize_real_edges(img: np.ndarray) -> np.ndarray:
+    """Binarize a real PCB image using edge detection + flood fill.
+
+    1. Canny edges (auto thresholds from image median).
+    2. Dilate to seal small gaps between copper outline segments.
+    3. Flood-fill background from a padded border so the background is
+       connected regardless of image corners.
+    4. Pixels not reached by flood fill (enclosed by edges) = copper → black.
+
+    Returns 3-channel (copper=black, background=white), same convention as
+    binarize_real / binarize_synth.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    med = float(np.median(blurred))
+    edges = cv2.Canny(blurred, max(0.0, 0.5 * med), min(255.0, 1.5 * med))
+
+    # Dilate to close small gaps in copper outlines
+    kernel = np.ones((5, 5), np.uint8)
+    thick = cv2.dilate(edges, kernel, iterations=1)
+
+    # Build canvas: non-edge pixels are 255 (traversable), edge pixels are 0 (walls)
+    canvas = np.where(thick > 0, 0, 255).astype(np.uint8)
+
+    # Add a 1-pixel white border so the flood fill is guaranteed to start in background
+    h, w = canvas.shape
+    padded = cv2.copyMakeBorder(canvas, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=255)
+    mask = np.zeros((h + 4, w + 4), np.uint8)
+    cv2.floodFill(padded, mask, (0, 0), 128)   # background → 128
+    interior = padded[1:h + 1, 1:w + 1]        # remove padding
+
+    # 128 = background → white; everything else (edges + enclosed copper) → black
+    result = np.where(interior == 128, 255, 0).astype(np.uint8)
+
+    # Remove specks smaller than a small pad area
+    k_open = np.ones((3, 3), np.uint8)
+    result = cv2.morphologyEx(result, cv2.MORPH_OPEN, k_open)
+
+    return cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
+
+
 def binarize_synth(img: np.ndarray) -> np.ndarray:
     """Convert synthetic PCB image to DeepPCB-style binary.
 
