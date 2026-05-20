@@ -148,6 +148,145 @@ def _save_confusion_matrix(dataset, class_names, out_path, iou, conf):
     plt.close(fig)
 
 
+def compute_iou_boxes(box1, box2):
+    """Compute IoU between two boxes in [x, y, w, h] relative format."""
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+
+    xa = max(x1, x2)
+    ya = max(y1, y2)
+    xb = min(x1 + w1, x2 + w2)
+    yb = min(y1 + h1, y2 + h2)
+
+    inter = max(0, xb - xa) * max(0, yb - ya)
+    area1 = w1 * h1
+    area2 = w2 * h2
+    union = area1 + area2 - inter
+
+    return inter / union if union > 0 else 0
+
+
+def compute_ap(precisions, recalls):
+    """Compute Average Precision using 101-point interpolation (COCO style)."""
+    recalls = np.array(recalls)
+    precisions = np.array(precisions)
+
+    indices = np.argsort(recalls)
+    recalls = recalls[indices]
+    precisions = precisions[indices]
+
+    recalls = np.concatenate([[0], recalls, [1]])
+    precisions = np.concatenate([[0], precisions, [0]])
+
+    for i in range(len(precisions) - 2, -1, -1):
+        precisions[i] = max(precisions[i], precisions[i + 1])
+
+    recall_levels = np.linspace(0, 1, 101)
+    precision_at_recalls = np.zeros(101)
+    for i, r in enumerate(recall_levels):
+        idx = np.where(recalls >= r)[0]
+        if len(idx) > 0:
+            precision_at_recalls[i] = precisions[idx[0]]
+
+    return np.mean(precision_at_recalls)
+
+
+def compute_class_ap_from_dataset(dataset, cls_name, iou_thresh):
+    """Compute AP for a single class at a given IoU threshold from FiftyOne dataset."""
+    all_detections = []
+    total_gt = 0
+
+    for sample in dataset:
+        gt_dets = sample["ground_truth"].detections if sample["ground_truth"] else []
+        pred_dets = sample["predictions"].detections if sample["predictions"] else []
+
+        class_gts = [d for d in gt_dets if d.label == cls_name]
+        total_gt += len(class_gts)
+
+        for pred in pred_dets:
+            if pred.label == cls_name:
+                all_detections.append((sample.id, pred.bounding_box, pred.confidence, class_gts))
+
+    if total_gt == 0:
+        return 0.0
+
+    all_detections.sort(key=lambda x: -x[2])
+
+    gt_matched = {}
+    tps = []
+    fps = []
+
+    for sample_id, pred_box, conf, class_gts in all_detections:
+        if sample_id not in gt_matched:
+            gt_matched[sample_id] = set()
+
+        matched = False
+        best_iou = 0
+        best_gt_idx = -1
+
+        for gi, gt_det in enumerate(class_gts):
+            if gi in gt_matched[sample_id]:
+                continue
+            iou = compute_iou_boxes(pred_box, gt_det.bounding_box)
+            if iou >= iou_thresh and iou > best_iou:
+                best_iou = iou
+                best_gt_idx = gi
+                matched = True
+
+        if matched:
+            gt_matched[sample_id].add(best_gt_idx)
+            tps.append(1)
+            fps.append(0)
+        else:
+            tps.append(0)
+            fps.append(1)
+
+    tps = np.cumsum(tps)
+    fps = np.cumsum(fps)
+
+    if len(tps) == 0:
+        return 0.0
+
+    recalls = tps / total_gt
+    precisions = tps / (tps + fps)
+
+    return compute_ap(precisions, recalls)
+
+
+def compute_and_print_map(dataset, class_names, iou_thresholds=[0.25, 0.50, 0.75]):
+    """Compute and print mAP at multiple IoU thresholds."""
+    print(f"\n── Per-class AP at Different IoU Thresholds ──────────────────────────")
+    header = f"{'Class':<20}"
+    for iou in iou_thresholds:
+        header += f" {'AP@' + str(int(iou*100)):>10}"
+    print(header)
+    print("-" * (20 + 11 * len(iou_thresholds)))
+
+    all_aps = {iou: [] for iou in iou_thresholds}
+
+    for cls_name in class_names:
+        row = f"  {cls_name:<20}"
+        for iou in iou_thresholds:
+            ap = compute_class_ap_from_dataset(dataset, cls_name, iou)
+            all_aps[iou].append(ap)
+            row += f" {ap:>9.4f}"
+        print(row)
+
+    print("-" * (20 + 11 * len(iou_thresholds)))
+    row = f"  {'mAP':<20}"
+    for iou in iou_thresholds:
+        map_val = np.mean(all_aps[iou]) if all_aps[iou] else 0
+        row += f" {map_val:>9.4f}"
+    print(row)
+
+    print(f"\n── mAP Summary ─────────────────────────────────")
+    for iou in iou_thresholds:
+        map_val = np.mean(all_aps[iou]) if all_aps[iou] else 0
+        print(f"  mAP@{int(iou*100):<6} {map_val:.4f}")
+
+    return all_aps
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Visualize YOLO errors with FiftyOne")
     p.add_argument("--model", type=str, required=True, help="Path to YOLO model weights")
@@ -160,6 +299,8 @@ def parse_args():
     p.add_argument("--name", type=str, default="pcb_analysis", help="Dataset name")
     p.add_argument("--delete", action="store_true", help="Delete existing dataset and recreate")
     p.add_argument("--grayscale", action="store_true", help="Convert images to grayscale before inference (for models trained on grayscale)")
+    p.add_argument("--no_launch", action="store_true", help="Skip FiftyOne UI, just print metrics and save confusion matrix")
+    p.add_argument("--compute_map", action="store_true", help="Compute mAP at multiple IoU thresholds (0.25, 0.50, 0.75)")
     return p.parse_args()
 
 
@@ -283,6 +424,10 @@ def main():
     print("-" * 74)
     print(f"{'TOTAL':<20} {total_tp:>6} {total_fp:>6} {total_fn:>6} {total_p:>10.3f} {total_r:>10.3f} {total_f1:>10.3f}")
 
+    # Compute mAP at multiple IoU thresholds if requested
+    if args.compute_map:
+        compute_and_print_map(dataset, CLASS_NAMES, iou_thresholds=[0.25, 0.50, 0.75])
+
     # Summary
     print("\n" + "=" * 60)
     print("DATASET SUMMARY")
@@ -305,22 +450,25 @@ def main():
         count = dataset.filter_labels("predictions", fo.ViewField("label") == cls).count("predictions.detections")
         print(f"  {cls:<20} {count}")
 
-    # Launch app
-    print(f"\n" + "=" * 60)
-    print("FIFTYONE UI")
-    print("=" * 60)
-    print(f"Open http://localhost:{args.port} in your browser")
-    print("\nFiltering examples (paste in filter bar):")
-    print("  False negatives (missed GT):     F('eval') == 'fn'")
-    print("  False positives (wrong pred):    F('eval') == 'fp'")
-    print("  True positives:                  F('eval') == 'tp'")
-    print("  GT class filter:                 F('ground_truth.detections.label') == 'mouse_bite'")
-    print("  Pred class filter:               F('predictions.detections.label') == 'spur'")
-    print("  High confidence only:            F('predictions.detections.confidence') > 0.7")
-    print("\nPress Ctrl+C to stop")
+    if args.no_launch:
+        print(f"\n(Skipping FiftyOne UI launch due to --no_launch flag)")
+    else:
+        # Launch app
+        print(f"\n" + "=" * 60)
+        print("FIFTYONE UI")
+        print("=" * 60)
+        print(f"Open http://localhost:{args.port} in your browser")
+        print("\nFiltering examples (paste in filter bar):")
+        print("  False negatives (missed GT):     F('eval') == 'fn'")
+        print("  False positives (wrong pred):    F('eval') == 'fp'")
+        print("  True positives:                  F('eval') == 'tp'")
+        print("  GT class filter:                 F('ground_truth.detections.label') == 'mouse_bite'")
+        print("  Pred class filter:               F('predictions.detections.label') == 'spur'")
+        print("  High confidence only:            F('predictions.detections.confidence') > 0.7")
+        print("\nPress Ctrl+C to stop")
 
-    session = fo.launch_app(dataset, port=args.port)
-    session.wait()
+        session = fo.launch_app(dataset, port=args.port)
+        session.wait()
 
 
 if __name__ == "__main__":
