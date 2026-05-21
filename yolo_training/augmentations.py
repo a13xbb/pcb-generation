@@ -24,20 +24,33 @@ def find_background_color(img: np.ndarray) -> Tuple[int, int, int]:
 def binarize_real(img: np.ndarray) -> np.ndarray:
     """Binarize a real PCB image to DeepPCB-style binary (copper=black, background=white).
 
-    CLAHE on grayscale enhances local contrast so Otsu reliably separates copper
-    from the solder-mask substrate regardless of lighting variation across the board.
-    Run on the full image before cropping — the global threshold is stable;
-    per-patch thresholds are not.
+    Two-step Otsu (mirrors sam_pipeline.ipynb logic):
+    1. Otsu on the full image → threshold1 separates bright pads from background+traces.
+    2. Otsu on pixels below threshold1 → threshold2 separates dark traces from background.
+    Result: background in [threshold2, threshold1) → white; traces and pads → black.
     """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blurred = cv2.medianBlur(gray, 5)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(16, 16))
-    enhanced = clahe.apply(blurred)
-    _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    kernel = np.ones((3, 3), np.uint8)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+    # Step 1: separate pads (bright) from background + traces
+    thresh1, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    thresh1 = int(thresh1)
+
+    # Step 2: on non-pad pixels, separate dark traces from solder-mask background
+    non_pad = blurred[blurred < thresh1]
+    thresh2, _ = cv2.threshold(
+        non_pad.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    thresh2 = int(thresh2)
+
+    # Dark traces (< thresh2) → white; background and pads → black
+    bg_mask = (blurred < thresh2).astype(np.uint8) * 255
+
+    kernel = np.ones((5, 5), np.uint8)
+    bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_OPEN, kernel)
+    bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_CLOSE, kernel)
+
+    return cv2.cvtColor(bg_mask, cv2.COLOR_GRAY2BGR)
 
 
 def binarize_real_edges(img: np.ndarray) -> np.ndarray:

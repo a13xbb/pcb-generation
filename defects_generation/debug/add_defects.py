@@ -58,19 +58,16 @@ def _draw_annotations(image_bgr: np.ndarray, annotations: list) -> np.ndarray:
         color = _CLASS_COLORS.get(ann.class_id, (255, 255, 255))
         label = CLASS_NAMES[ann.class_id]
 
-        # Add metadata to label if present
-        if ann.metadata.get("depth_pct"):
-            label = f"{label} {ann.metadata['depth_pct']}%"
-
         cx = int(ann.center_x * w)
         cy = int(ann.center_y * h)
         bw = int(ann.width * w)
         bh = int(ann.height * h)
 
-        x1 = cx - bw // 2
-        y1 = cy - bh // 2
-        x2 = cx + bw // 2
-        y2 = cy + bh // 2
+        pad = 20
+        x1 = cx - bw // 2 - pad
+        y1 = cy - bh // 2 - pad
+        x2 = cx + bw // 2 + pad
+        y2 = cy + bh // 2 + pad
 
         cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
 
@@ -94,7 +91,7 @@ def _draw_annotations(image_bgr: np.ndarray, annotations: list) -> np.ndarray:
     return vis
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args() -> argparse.Namespace: 
     valid_types = list(CLASS_NAMES.values())
     p = argparse.ArgumentParser(description="Add defects to a pre-generated PCB image.")
     p.add_argument("--image",   type=str, required=True, help="Path to image.png from generate.py")
