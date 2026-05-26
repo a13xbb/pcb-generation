@@ -18,12 +18,16 @@ Filtering in FiftyOne UI:
   - By confidence: F("predictions.detections.confidence") > 0.5
 """
 import argparse
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 import fiftyone as fo
 from ultralytics import YOLO
+
+sys.path.insert(0, str(Path(__file__).parent))
+from augmentations import binarize_real, binarize_synth
 
 ROOT = Path(__file__).parent.parent
 _DEFAULT_IMAGES = ROOT / "pcb-defect-dataset/test/images"
@@ -299,6 +303,8 @@ def parse_args():
     p.add_argument("--name", type=str, default="pcb_analysis", help="Dataset name")
     p.add_argument("--delete", action="store_true", help="Delete existing dataset and recreate")
     p.add_argument("--grayscale", action="store_true", help="Convert images to grayscale before inference (for models trained on grayscale)")
+    p.add_argument("--binarize_real", action="store_true", help="Apply binarize_real() from augmentations.py before inference (real PCB → DeepPCB-style binary)")
+    p.add_argument("--binarize_synth", action="store_true", help="Apply binarize_synth() from augmentations.py before inference (synthetic PCB → DeepPCB-style binary)")
     p.add_argument("--no_launch", action="store_true", help="Skip FiftyOne UI, just print metrics and save confusion matrix")
     p.add_argument("--compute_map", action="store_true", help="Compute mAP at multiple IoU thresholds (0.25, 0.50, 0.75)")
     return p.parse_args()
@@ -343,10 +349,15 @@ def main():
             sample["ground_truth"] = load_yolo_labels(label_path, CLASS_NAMES)
 
             # Predictions
-            if args.grayscale:
+            if args.binarize_real or args.binarize_synth or args.grayscale:
                 bgr = cv2.imread(str(img_path))
-                gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-                img_input = np.stack([gray, gray, gray], axis=-1)
+                if args.binarize_real:
+                    img_input = binarize_real(bgr)
+                elif args.binarize_synth:
+                    img_input = binarize_synth(bgr)
+                else:
+                    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                    img_input = np.stack([gray, gray, gray], axis=-1)
             else:
                 img_input = str(img_path)
             results = model(img_input, conf=args.conf, verbose=False)[0]
