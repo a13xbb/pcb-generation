@@ -1,7 +1,5 @@
 from __future__ import annotations
 import os
-import env
-os.environ['HF_HOME'] = env.HF_HOME
 
 import random
 from dataclasses import dataclass

@@ -36,9 +36,6 @@ _ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "layout_generator"))  # required for unpickling CanvasState
 
-import env  # noqa: E402
-os.environ["HF_HOME"] = env.HF_HOME
-
 import cv2
 import numpy as np
 import torch
