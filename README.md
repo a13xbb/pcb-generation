@@ -208,9 +208,27 @@ Common flags across all training scripts:
 | `--binarize_p` | `0.3` | Probability of binarization augmentation |
 | `--crop_p` | `0.3` | Probability of random zoom-in crop |
 
-**Evaluation:**
+**Evaluation & error visualization:**
+
+`yolo_training/visualize_errors.py` loads a trained model and test set into [FiftyOne](https://voxel51.com/fiftyone/), computes TP/FP/FN per class, and opens an interactive browser UI for filtering errors by class, confidence, or evaluation outcome.
+
 ```bash
-python yolo_training/evaluate.py
+python yolo_training/visualize_errors.py \
+    --model yolo_training/results/synth_train/weights/best.pt \
+    --name synth_analysis
+
+# custom thresholds
+python yolo_training/visualize_errors.py \
+    --model yolo_training/results/real_train/weights/best.pt \
+    --name real_analysis \
+    --conf 0.25 --iou 0.5
+```
+
+Example FiftyOne UI filters:
+```
+F("eval") == "fn"                                    # missed detections
+F("ground_truth.detections.label") == "mouse_bite"  # by GT class
+F("predictions.detections.confidence") > 0.5        # by confidence
 ```
 
 ---
@@ -244,20 +262,12 @@ python yolo_training/evaluate.py
 │   ├── spur.py
 │   └── spurious_copper.py
 │
-├── yolo_training/                # Defect detector training
-│   ├── augmentations.py          # Shared grayscale/binarization transforms
-│   ├── train_combined_v1.py
-│   ├── train_real_grayscale_v3.py
-│   ├── train_grayscale_synth_v2.py
-│   └── evaluate.py
-│
-├── assets/
-│   ├── PADS/                     # 53 pad masks (mask_XXXX.png + object_XXXX.png)
-│   └── COPPER_TRACES/            # 44 trace masks
-│
-├── trained/                      # Trained model checkpoints
-│   ├── controlnet_aug_600x600/
-│   └── lora_aug_600x600/
-│
-└── models/                       # sam3.pt
+└── yolo_training/                # Defect detector training & evaluation
+    ├── augmentations.py          # Shared grayscale/binarization transforms
+    ├── train_combined_v1.py
+    ├── train_real_grayscale_v2.py
+    ├── train_synth_grayscale_v2.py
+    ├── train_real_v1.py
+    ├── train_synth_v1.py
+    └── visualize_errors.py       # FiftyOne error analysis (TP/FP/FN)
 ```
